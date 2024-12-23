@@ -75,21 +75,16 @@ func camelToSnakeCase(s string) string {
 	return result.String()
 }
 
-// CreateMigration creates a new migration file with the given name and current timestamp.
-// It generates a unique filename based on the current timestamp and the migration name.
-// The file content includes placeholders for the up and down migration scripts.
+// CreateMigration creates new migration file with the given name and current timestamp.
 func CreateMigration(name string) error {
-	// Generate a timestamp in the format YYYYMMDDHHMMSS.
 	timestamp := time.Now().Format("20060102150405")
-
-	// Combine the timestamp and name to create a unique filename.
 	filename := fmt.Sprintf("%s_%s.cql", timestamp, name)
 
-	// Extract the table name from the migration name.
 	tableName := extractTableName(name)
 
-	// Define the content of the migration file with placeholders for the up and down migration scripts.
-	content := fmt.Sprintf(`-- Up Migration
+	content := fmt.Sprintf(`-- Migration: %s
+
+-- Up Migration
 ----------------------- Write your up migration here ----------------------------
 
 CREATE TABLE IF NOT EXISTS %s (
@@ -98,21 +93,25 @@ CREATE TABLE IF NOT EXISTS %s (
     updated_at timestamp
 );
 
+
 -- Down Migration
 ----------------------- Write your down migration here ----------------------------
 
-DROP TABLE IF EXISTS %s;`, tableName, tableName)
+DROP TABLE IF EXISTS %s;`, name, strings.ToLower(tableName), strings.ToLower(tableName))
 
-	// Define the full path for the migration file.
-	filePath := filepath.Join(migrationPath, filename)
+	// Create the migration file in the CQL folder within the migration path
+	cqlPath := filepath.Join(migrationPath, "cql")
+	if err := os.MkdirAll(cqlPath, 0755); err != nil {
+		return fmt.Errorf("failed to create CQL directory: %w", err)
+	}
 
-	// Write the migration content to the file.
+	// Write the up and down migration file in the CQL folder
+	filePath := filepath.Join(cqlPath, filename)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to create migration file: %w", err)
 	}
 
-	// Print confirmation of migration file creation.
-	fmt.Printf("Created migration file: %s\n", filePath)
+	fmt.Printf("%sCreated migration file: %s%s\n", ColorGreen, filePath, ColorReset)
 	return nil
 }
 

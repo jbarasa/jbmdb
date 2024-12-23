@@ -131,14 +131,20 @@ CREATE TABLE IF NOT EXISTS %s (
 
 DROP TABLE IF EXISTS %s;`, strings.ToLower(tableName), strings.ToLower(tableName))
 
-	// Write the up and down migration file.
-	filePath := filepath.Join(migrationPath, filename)
+	// Create the migration file in the SQL folder within the migration path
+	sqlPath := filepath.Join(migrationPath, "sql")
+	if err := os.MkdirAll(sqlPath, 0755); err != nil {
+		return fmt.Errorf("failed to create SQL directory: %w", err)
+	}
+
+	// Write the up and down migration file in the SQL folder
+	filePath := filepath.Join(sqlPath, filename)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to create migration file: %w", err)
 	}
 
 	// Print the paths of the created migration files.
-	fmt.Printf("Created migration file: %s\n", filePath)
+	fmt.Printf("%sCreated migration file: %s%s\n", ColorGreen, filePath, ColorReset)
 	return nil
 }
 
