@@ -118,34 +118,36 @@ DROP TABLE IF EXISTS %s;`, name, strings.ToLower(tableName), strings.ToLower(tab
 // loadMigrations loads all migration files from the migration directory.
 // It reads the directory, parses each migration file, and returns a slice of Migration structs.
 func loadMigrations() ([]Migration, error) {
-	// Read the list of files in the migration directory.
-	files, err := os.ReadDir(migrationPath)
+	// Get the CQL directory path
+	cqlPath := filepath.Join(migrationPath, "cql")
+
+	// Read the migration directory
+	files, err := os.ReadDir(cqlPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read migration directory: %w", err)
 	}
 
 	var migrations []Migration
 	for _, file := range files {
-		// Process only files with the ".cql" extension
+		// Process only .cql files
 		if filepath.Ext(file.Name()) == ".cql" {
-			// Split the filename into parts to extract the version and name
+			// Split the filename by underscores
 			parts := strings.Split(file.Name(), "_")
 			if len(parts) < 2 {
-				continue
+				continue // Skip files that don't have at least a version and name part
 			}
 
-			// Parse the version number from the filename
+			// Parse version and name from filename
 			version := parseInt(parts[0])
-			// Extract the migration name from the filename
 			name := strings.TrimSuffix(strings.Join(parts[1:], "_"), filepath.Ext(file.Name()))
 
 			// Read the content of the migration file
-			content, err := os.ReadFile(filepath.Join(migrationPath, file.Name()))
+			content, err := os.ReadFile(filepath.Join(cqlPath, file.Name()))
 			if err != nil {
 				return nil, fmt.Errorf("failed to read migration file %s: %w", file.Name(), err)
 			}
 
-			// Split the content into UpCQL and DownCQL parts
+			// Split content into up and down migrations
 			upDown := strings.Split(string(content), "-- Down Migration")
 			if len(upDown) != 2 {
 				return nil, fmt.Errorf("invalid migration format in file %s", file.Name())
@@ -361,52 +363,42 @@ func getLatestMigration(session *gocql.Session) (int64, error) {
 
 // ListMigrations retrieves and lists all migrations along with their status.
 func ListMigrations(session *gocql.Session) error {
+	// Load all migrations from files
 	migrations, err := loadMigrations()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load migrations: %w", err)
 	}
 
-	fmt.Printf("\n%s%s=== Migrations ===%s\n\n", ColorBold, ColorBlue, ColorReset)
-
-	if len(migrations) == 0 {
-		fmt.Printf("%sNo migrations found%s\n", ColorYellow, ColorReset)
-		return nil
+	// Get all applied migrations from the database
+	appliedMigrations := make(map[int64]time.Time)
+	iter := session.Query("SELECT version, applied_at FROM migrations").Iter()
+	var version int64
+	var appliedAt time.Time
+	for iter.Scan(&version, &appliedAt) {
+		appliedMigrations[version] = appliedAt
+	}
+	if err := iter.Close(); err != nil {
+		return fmt.Errorf("failed to query migrations table: %w", err)
 	}
 
-	var appliedCount, pendingCount int
+	// Print header
+	fmt.Printf("\n%sMigration Status%s\n", ColorBold, ColorReset)
+	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("%-20s %-30s %-15s %s\n", "Version", "Name", "Status", "Applied At")
+	fmt.Println(strings.Repeat("-", 80))
 
+	// Print each migration with its status
 	for _, m := range migrations {
-		applied, err := isMigrationApplied(session, m.Version)
-		if err != nil {
-			return err
+		appliedAt, isApplied := appliedMigrations[m.Version]
+		status := fmt.Sprintf("%sPending%s", ColorYellow, ColorReset)
+		appliedAtStr := "Not Applied"
+		if isApplied {
+			status = fmt.Sprintf("%sApplied%s", ColorGreen, ColorReset)
+			appliedAtStr = appliedAt.Format("2006-01-02 15:04:05")
 		}
-
-		var status, statusColor string
-		if applied {
-			status = "APPLIED"
-			statusColor = ColorGreen
-			appliedCount++
-		} else {
-			status = "PENDING"
-			statusColor = ColorYellow
-			pendingCount++
-		}
-
-		fmt.Printf("%s[%s]%s %s%d_%s%s\n",
-			statusColor,
-			status,
-			ColorReset,
-			ColorCyan,
-			m.Version,
-			m.Name,
-			ColorReset,
-		)
+		fmt.Printf("%-20d %-30s %-15s %s\n", m.Version, m.Name, status, appliedAtStr)
 	}
-
-	fmt.Printf("\n%s=== Summary ===%s\n", ColorPurple, ColorReset)
-	fmt.Printf("Total: %s%d%s migrations\n", ColorWhite, len(migrations), ColorReset)
-	fmt.Printf("Applied: %s%d%s\n", ColorGreen, appliedCount, ColorReset)
-	fmt.Printf("Pending: %s%d%s\n\n", ColorYellow, pendingCount, ColorReset)
+	fmt.Println(strings.Repeat("-", 80))
 
 	return nil
 }

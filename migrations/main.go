@@ -256,24 +256,8 @@ func createMigrationDirs() {
 }
 
 func handlePostgres(command string) {
-	// Load the migration path from config
-	existingConfig := make(map[string]string)
-	if data, err := os.ReadFile(DefaultConfigFile); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				existingConfig[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-			}
-		}
-	}
-
-	// Set the migration path
-	migrationPath := existingConfig["POSTGRES_MIGRATIONS_PATH"]
-	if migrationPath == "" {
-		migrationPath = "database/migrations"
-	}
-	postgres.SetMigrationPath(migrationPath)
+	// Set the migration path from config
+	postgres.SetMigrationPath(config.PostgresPath)
 
 	// Construct database connection URL
 	dbURL := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
@@ -378,27 +362,14 @@ func handlePostgres(command string) {
 }
 
 func handleScylla(command string) {
-	// Load the migration path from config
-	existingConfig := make(map[string]string)
-	if data, err := os.ReadFile(DefaultConfigFile); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				existingConfig[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-			}
-		}
-	}
+	// Set the migration path from config
+	scylladb.SetMigrationPath(config.ScyllaPath)
 
-	// Set the migration path
-	migrationPath := existingConfig["SCYLLA_MIGRATIONS_PATH"]
-	if migrationPath == "" {
-		migrationPath = "database/migrations"
-	}
-	scylladb.SetMigrationPath(migrationPath)
+	// Get ScyllaDB hosts
+	hosts := strings.Split(os.Getenv("SCYLLA_HOSTS"), ",")
 
 	// Create ScyllaDB session
-	cluster := gocql.NewCluster(strings.Split(os.Getenv("SCYLLA_HOSTS"), ",")...)
+	cluster := gocql.NewCluster(hosts...)
 	cluster.Keyspace = os.Getenv("SCYLLA_KEYSPACE")
 	cluster.Authenticator = gocql.PasswordAuthenticator{
 		Username: os.Getenv("SCYLLA_USER"),

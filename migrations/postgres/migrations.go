@@ -157,8 +157,11 @@ func parseInt(s string) int64 {
 
 // loadMigrations loads all migration files from the migration directory and returns a slice of Migration structs.
 func loadMigrations() ([]Migration, error) {
+	// Get the SQL directory path
+	sqlPath := filepath.Join(migrationPath, "sql")
+
 	// Read the migration directory.
-	files, err := os.ReadDir(migrationPath)
+	files, err := os.ReadDir(sqlPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read migration directory: %w", err)
 	}
@@ -179,7 +182,7 @@ func loadMigrations() ([]Migration, error) {
 			name := strings.TrimSuffix(strings.Join(parts[1:], "_"), filepath.Ext(file.Name()))
 
 			// Read the content of the migration file.
-			content, err := os.ReadFile(filepath.Join(migrationPath, file.Name()))
+			content, err := os.ReadFile(filepath.Join(sqlPath, file.Name()))
 			if err != nil {
 				return nil, fmt.Errorf("failed to read migration file %s: %w", file.Name(), err)
 			}
@@ -446,58 +449,48 @@ func getLatestMigration(db *pgxpool.Pool) (int64, error) {
 
 // ListMigrations retrieves and lists all migrations along with their status (applied or pending).
 func ListMigrations(db *pgxpool.Pool) error {
+	// Load all migrations from files
 	migrations, err := loadMigrations()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load migrations: %w", err)
 	}
 
-	// Print header for migrations list
-	fmt.Printf("\n%s%s=== Migrations ===%s\n\n", ColorBold, ColorBlue, ColorReset)
+	// Get all applied migrations from the database
+	rows, err := db.Query(context.Background(), "SELECT version, applied_at FROM migrations ORDER BY version")
+	if err != nil {
+		return fmt.Errorf("failed to query migrations table: %w", err)
+	}
+	defer rows.Close()
 
-	if len(migrations) == 0 {
-		fmt.Printf("%sNo migrations found%s\n", ColorYellow, ColorReset)
-		return nil
+	// Create a map of applied migrations
+	appliedMigrations := make(map[int64]time.Time)
+	for rows.Next() {
+		var version int64
+		var appliedAt time.Time
+		if err := rows.Scan(&version, &appliedAt); err != nil {
+			return fmt.Errorf("failed to scan migration row: %w", err)
+		}
+		appliedMigrations[version] = appliedAt
 	}
 
-	// Track counts
-	var appliedCount, pendingCount int
+	// Print header
+	fmt.Printf("\n%sMigration Status%s\n", ColorBold, ColorReset)
+	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("%-20s %-30s %-15s %s\n", "Version", "Name", "Status", "Applied At")
+	fmt.Println(strings.Repeat("-", 80))
 
-	// Iterate over each migration
+	// Print each migration with its status
 	for _, m := range migrations {
-		applied, err := isMigrationApplied(db, m.Version)
-		if err != nil {
-			return err
+		appliedAt, isApplied := appliedMigrations[m.Version]
+		status := fmt.Sprintf("%sPending%s", ColorYellow, ColorReset)
+		appliedAtStr := "Not Applied"
+		if isApplied {
+			status = fmt.Sprintf("%sApplied%s", ColorGreen, ColorReset)
+			appliedAtStr = appliedAt.Format("2006-01-02 15:04:05")
 		}
-
-		// Determine status and color
-		var status, statusColor string
-		if applied {
-			status = "APPLIED"
-			statusColor = ColorGreen
-			appliedCount++
-		} else {
-			status = "PENDING"
-			statusColor = ColorYellow
-			pendingCount++
-		}
-
-		// Print migration details with status
-		fmt.Printf("%s[%s]%s %s%d_%s%s\n",
-			statusColor,
-			status,
-			ColorReset,
-			ColorCyan,
-			m.Version,
-			m.Name,
-			ColorReset,
-		)
+		fmt.Printf("%-20d %-30s %-15s %s\n", m.Version, m.Name, status, appliedAtStr)
 	}
-
-	// Print summary
-	fmt.Printf("\n%s=== Summary ===%s\n", ColorPurple, ColorReset)
-	fmt.Printf("Total: %s%d%s migrations\n", ColorWhite, len(migrations), ColorReset)
-	fmt.Printf("Applied: %s%d%s\n", ColorGreen, appliedCount, ColorReset)
-	fmt.Printf("Pending: %s%d%s\n\n", ColorYellow, pendingCount, ColorReset)
+	fmt.Println(strings.Repeat("-", 80))
 
 	return nil
 }
