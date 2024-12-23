@@ -507,15 +507,27 @@ func initPostgresConfig() {
 	existingConfig["POSTGRES_MIGRATIONS_PATH"] = migrationPath
 	existingConfig["SQL_FOLDER"] = "sql"
 
+	// Create migrations directory and SQL folder inside it
+	if err := os.MkdirAll(migrationPath, 0755); err != nil {
+		fmt.Printf("%sError creating migrations directory: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
+		os.Exit(1)
+	}
+
+	// Create SQL folder inside the migrations directory
+	sqlPath := filepath.Join(migrationPath, "sql")
+	if err := os.MkdirAll(sqlPath, 0755); err != nil {
+		fmt.Printf("%sError creating SQL directory: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
+		os.Exit(1)
+	}
+
 	// Write back the complete configuration
 	var content string
 	for k, v := range existingConfig {
 		content += fmt.Sprintf("%s=%s\n", k, v)
 	}
 
-	// Create migrations directory
-	if err := os.MkdirAll(migrationPath, 0755); err != nil {
-		fmt.Printf("%sError creating migrations directory: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
+	if err := os.WriteFile(DefaultConfigFile, []byte(content), 0644); err != nil {
+		fmt.Printf("%sError saving migration path configuration: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
 		os.Exit(1)
 	}
 
@@ -556,7 +568,6 @@ func initScyllaConfig() {
 		}
 	}
 
-	// Save the migration path to .jbmdb.conf
 	// Read existing config first to preserve PostgreSQL settings if they exist
 	existingConfig := make(map[string]string)
 	if data, err := os.ReadFile(DefaultConfigFile); err == nil {
@@ -573,13 +584,14 @@ func initScyllaConfig() {
 	existingConfig["SCYLLA_MIGRATIONS_PATH"] = migrationPath
 	existingConfig["CQL_FOLDER"] = "cql"
 
-	// Create migrations and CQL directories for ScyllaDB
+	// Create migrations directory and CQL folder inside it
 	if err := os.MkdirAll(migrationPath, 0755); err != nil {
 		fmt.Printf("%sError creating migrations directory: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
 		os.Exit(1)
 	}
 
-	cqlPath := filepath.Join(filepath.Dir(migrationPath), "cql")
+	// Create CQL folder inside the migrations directory
+	cqlPath := filepath.Join(migrationPath, "cql")
 	if err := os.MkdirAll(cqlPath, 0755); err != nil {
 		fmt.Printf("%sError creating CQL directory: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
 		os.Exit(1)
@@ -629,7 +641,7 @@ func handleUpdate() {
 		fmt.Printf("%sError installing update: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
 		os.Exit(1)
 	}
-	fmt.Printf("%sUpdate successful! Please restart jbmdb to use the new version%s\n", postgres.ColorGreen, postgres.ColorReset)
+	fmt.Printf("%sUpdate successful! Please restart jbmdb to use the new version if it doesn't start automatically`%s\n", postgres.ColorGreen, postgres.ColorReset)
 }
 
 func writeEnvFile(content string, isPostgres bool) {
