@@ -1,4 +1,4 @@
-module github.com/jbarasa/jbmdb // v0.1.0
+module github.com/jbarasa/jbmdb // v1.0.0
 
 go 1.23.4
 
