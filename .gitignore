@@ -1,0 +1,33 @@
+GIT_COMMANDS.md
+# Binaries and build artifacts
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment and configuration files
+.env
+*.env
+.env.*
+
+# Dependency directories
+vendor/
+
+# Test files
+*.test
+*.tmp
+
+# Log files
+*.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
