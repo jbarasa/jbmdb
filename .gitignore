@@ -6,6 +6,8 @@ build/
 *.so
 *.dylib
 
+build
+
 # IDE and editor files
 .idea/
 .vscode/
