@@ -88,6 +88,12 @@ func main() {
 		return
 	}
 
+	// Check for version command
+	if command == "version" {
+		fmt.Printf("jbmdb version %s\n", Version)
+		return
+	}
+
 	// Split command into db type and action
 	parts := strings.Split(command, "-")
 	if len(parts) != 2 {
@@ -116,6 +122,7 @@ func showUsage() {
 	fmt.Printf("  %sConfiguration:%s\n", postgres.ColorCyan, postgres.ColorReset)
 	fmt.Printf("    config              Configure migration paths and folder names\n")
 	fmt.Printf("    update              Check for and install updates\n")
+	fmt.Printf("    version             Show version information\n")
 	fmt.Printf("\n  %sPostgreSQL:%s\n", postgres.ColorCyan, postgres.ColorReset)
 	fmt.Printf("    postgres-migration <name>   Create a new PostgreSQL migration\n")
 	fmt.Printf("    postgres-migrate       Run all pending PostgreSQL migrations\n")
@@ -566,6 +573,18 @@ func initScyllaConfig() {
 	existingConfig["SCYLLA_MIGRATIONS_PATH"] = migrationPath
 	existingConfig["CQL_FOLDER"] = "cql"
 
+	// Create migrations and CQL directories for ScyllaDB
+	if err := os.MkdirAll(migrationPath, 0755); err != nil {
+		fmt.Printf("%sError creating migrations directory: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
+		os.Exit(1)
+	}
+
+	cqlPath := filepath.Join(filepath.Dir(migrationPath), "cql")
+	if err := os.MkdirAll(cqlPath, 0755); err != nil {
+		fmt.Printf("%sError creating CQL directory: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
+		os.Exit(1)
+	}
+
 	// Write back the complete configuration
 	var content string
 	for k, v := range existingConfig {
@@ -574,12 +593,6 @@ func initScyllaConfig() {
 
 	if err := os.WriteFile(DefaultConfigFile, []byte(content), 0644); err != nil {
 		fmt.Printf("%sError saving migration path configuration: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
-		os.Exit(1)
-	}
-
-	// Create migrations directory
-	if err := os.MkdirAll(migrationPath, 0755); err != nil {
-		fmt.Printf("%sError creating migrations directory: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
 		os.Exit(1)
 	}
 

@@ -60,6 +60,9 @@ SCYLLA_PASSWORD=your_password
 ```bash
 # Set up migration paths and folder names
 jbmdb config
+
+# Check version information
+jbmdb version
 ```
 
 ### Update

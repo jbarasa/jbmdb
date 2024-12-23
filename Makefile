@@ -135,6 +135,9 @@ install-linux: build-linux
 	sudo mv $(BUILD_DIR)/$(BINARY_NAME)-linux /usr/local/bin/$(BINARY_NAME)
 	sudo chmod +x /usr/local/bin/$(BINARY_NAME)
 
+version:
+	@echo $(VERSION)
+
 # Test the binary
 test: build-linux
 	@echo "Testing PostgreSQL commands..."
