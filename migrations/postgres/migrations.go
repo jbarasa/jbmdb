@@ -38,16 +38,18 @@
 package postgres
 
 import (
-	"context"       // Import context for managing contexts across API boundaries.
-	"fmt"           // Import fmt for formatted I/O operations.
-	"os"            // Import os for operating system interactions.
-	"path/filepath" // Import filepath for manipulating file paths.
-	"sort"          // Import sort for sorting slices.
-	"strings"       // Import strings for string manipulation.
-	"time"          // Import time for time-related functions.
-	"unicode"       // Import unicode for Unicode-related functions and constants.
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+	"unicode"
 
-	"github.com/jackc/pgx/v5/pgxpool" // Import pgxpool for PostgreSQL connection pooling.
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jbarasa/jbmdb/migrations/config"
 )
 
 // Migration represents a database migration with its version, name, SQL scripts for
@@ -67,17 +69,17 @@ func SetMigrationPath(path string) {
 	migrationPath = path
 }
 
-// Color codes for terminal output
+// Color constants for terminal output
 const (
-	ColorReset  = "\033[0m"
 	ColorRed    = "\033[31m"
 	ColorGreen  = "\033[32m"
-	ColorYellow = "\033[33m"
 	ColorBlue   = "\033[34m"
 	ColorPurple = "\033[35m"
 	ColorCyan   = "\033[36m"
-	ColorWhite  = "\033[37m"
+	ColorGray   = "\033[37m"
 	ColorBold   = "\033[1m"
+	ColorReset  = "\033[0m"
+	ColorYellow = "\033[33m"
 )
 
 // extractTableName extracts the table name from the migration name
@@ -106,14 +108,37 @@ func camelToSnakeCase(s string) string {
 	return result.String()
 }
 
+// checkDuplicateTableName checks if a migration with the same table name already exists
+func checkDuplicateTableName(newTableName string) error {
+	migrations, err := loadMigrations()
+	if err != nil {
+		return fmt.Errorf("failed to load migrations: %w", err)
+	}
+
+	for _, migration := range migrations {
+		existingTableName := extractTableName(migration.Name)
+		if strings.EqualFold(existingTableName, newTableName) {
+			return fmt.Errorf("%stable name '%s' already exists in migration '%s'%s",
+				ColorRed, newTableName, migration.Name, ColorReset)
+		}
+	}
+	return nil
+}
+
 // CreateMigration creates new migration file with the given name and current timestamp.
 func CreateMigration(name string) error {
+	// Extract table name from migration name
+	tableName := extractTableName(name)
+
+	// Check for duplicate table names
+	if err := checkDuplicateTableName(tableName); err != nil {
+		return err
+	}
+
 	// Generate a timestamp in the format YYYYMMDDHHMMSS.
 	timestamp := time.Now().Format("20060102150405")
 	// Combine the timestamp and name to create a unique filename.
 	filename := fmt.Sprintf("%s_%s.sql", timestamp, name)
-
-	tableName := extractTableName(name)
 
 	// Write placeholder content to the up and down migration file
 	content := fmt.Sprintf(`-- Up Migration
@@ -280,6 +305,49 @@ func RollbackLast(db *pgxpool.Pool) error {
 	return nil
 }
 
+// RollbackSteps rolls back a specified number of migrations
+func RollbackSteps(db *pgxpool.Pool, steps int) error {
+	// Get all applied migrations
+	appliedMigrations, err := getAppliedMigrations(db)
+	if err != nil {
+		return fmt.Errorf("failed to get applied migrations: %w", err)
+	}
+
+	if len(appliedMigrations) == 0 {
+		fmt.Printf("%sNo migrations to rollback%s\n", ColorYellow, ColorReset)
+		return nil
+	}
+
+	// Sort migrations by version in descending order
+	sort.Slice(appliedMigrations, func(i, j int) bool {
+		return appliedMigrations[i].Version > appliedMigrations[j].Version
+	})
+
+	// Limit steps to available migrations
+	if steps > len(appliedMigrations) {
+		steps = len(appliedMigrations)
+		fmt.Printf("%sNote: Only %d migrations available to rollback%s\n",
+			ColorYellow, steps, ColorReset)
+	}
+
+	// Rollback each migration
+	for i := 0; i < steps; i++ {
+		migration := appliedMigrations[i]
+		fmt.Printf("%s[ROLLBACK]%s Rolling back migration %s%d_%s%s... ",
+			ColorBlue, ColorReset, ColorCyan, migration.Version, migration.Name, ColorReset)
+
+		if err := rollbackMigration(db, migration); err != nil {
+			fmt.Printf("%sFAILED%s\n", ColorRed, ColorReset)
+			return fmt.Errorf("failed to rollback migration %d_%s: %w",
+				migration.Version, migration.Name, err)
+		}
+
+		fmt.Printf("%sDONE%s\n", ColorGreen, ColorReset)
+	}
+
+	return nil
+}
+
 // MigrateFresh drops all tables and applies all migrations from scratch.
 func MigrateFresh(db *pgxpool.Pool) error {
 	// Drop all tables in the database.
@@ -371,50 +439,83 @@ func applyMigration(db *pgxpool.Pool, migration Migration) error {
 	return nil
 }
 
-// rollbackMigration rolls back a single migration.
+// rollbackMigration rolls back a single migration within a transaction
 func rollbackMigration(db *pgxpool.Pool, migration Migration) error {
-	fmt.Printf("%s[ROLLING BACK]%s %s%d_%s%s... ",
-		ColorYellow,
-		ColorReset,
-		ColorCyan,
-		migration.Version,
-		migration.Name,
-		ColorReset,
-	)
-
-	// Start a new transaction.
 	tx, err := db.Begin(context.Background())
 	if err != nil {
-		fmt.Printf("%sFAILED%s\n", ColorRed, ColorReset)
 		return fmt.Errorf("failed to start transaction: %w", err)
 	}
 	defer tx.Rollback(context.Background())
 
-	// Convert SQL to lowercase before executing
-	lowercaseSQL := strings.ToLower(migration.DownSQL)
+	// Execute down migration
+	statements := strings.Split(migration.DownSQL, ";")
+	for _, stmt := range statements {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
 
-	// Execute the down migration SQL script.
-	if _, err := tx.Exec(context.Background(), lowercaseSQL); err != nil {
-		fmt.Printf("%sFAILED%s\n", ColorRed, ColorReset)
-		return fmt.Errorf("failed to rollback migration %d_%s: %w", migration.Version, migration.Name, err)
+		if _, err := tx.Exec(context.Background(), stmt); err != nil {
+			return fmt.Errorf("failed to execute down migration: %w", err)
+		}
 	}
 
-	// Delete the record of the rolled back migration from the migrations table.
+	// Remove migration record
 	if _, err := tx.Exec(context.Background(), `
 		DELETE FROM migrations WHERE version = $1
 	`, migration.Version); err != nil {
-		fmt.Printf("%sFAILED%s\n", ColorRed, ColorReset)
-		return fmt.Errorf("failed to remove migration record %d_%s: %w", migration.Version, migration.Name, err)
+		return fmt.Errorf("failed to remove migration record: %w", err)
 	}
 
-	// Commit the transaction.
 	if err := tx.Commit(context.Background()); err != nil {
-		fmt.Printf("%sFAILED%s\n", ColorRed, ColorReset)
-		return fmt.Errorf("failed to commit rollback of migration %d_%s: %w", migration.Version, migration.Name, err)
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	fmt.Printf("%sDONE%s\n", ColorGreen, ColorReset)
 	return nil
+}
+
+// getAppliedMigrations returns all applied migrations from the database
+func getAppliedMigrations(db *pgxpool.Pool) ([]Migration, error) {
+	rows, err := db.Query(context.Background(), `
+		SELECT version, name FROM migrations 
+		ORDER BY version DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query migrations: %w", err)
+	}
+	defer rows.Close()
+
+	var migrations []Migration
+	for rows.Next() {
+		var m Migration
+		if err := rows.Scan(&m.Version, &m.Name); err != nil {
+			return nil, fmt.Errorf("failed to scan migration: %w", err)
+		}
+
+		// Load migration file content
+		filename := fmt.Sprintf("%d_%s.sql", m.Version, m.Name)
+		filePath := filepath.Join(migrationPath, "sql", filename)
+
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read migration file %s: %w", filename, err)
+		}
+
+		// Split content into up and down migrations
+		parts := strings.Split(string(content), "-- Down Migration")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid migration format in file %s", filename)
+		}
+
+		m.DownSQL = strings.TrimSpace(parts[1])
+		migrations = append(migrations, m)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating migrations: %w", err)
+	}
+
+	return migrations, nil
 }
 
 // isMigrationApplied checks if a migration with a given version has already been applied.
@@ -524,4 +625,109 @@ func dropAllTables(db *pgxpool.Pool) error {
 		END $$;
 	`)
 	return err
+}
+
+// CreateDatabase creates a new database if it doesn't exist
+func CreateDatabase(pgConfig *config.PostgresConfig) error {
+	// Connect to postgres database to create new database
+	dbURL := fmt.Sprintf("postgres://%s:%s@%s:%s/postgres?sslmode=disable",
+		pgConfig.SuperUser, pgConfig.SuperPass, pgConfig.Host, pgConfig.Port)
+
+	// Use pgx.Connect instead of pgxpool for admin operations
+	conn, err := pgx.Connect(context.Background(), dbURL)
+	if err != nil {
+		return fmt.Errorf("unable to connect to PostgreSQL: %v", err)
+	}
+	defer conn.Close(context.Background())
+
+	// Check if database exists
+	var exists bool
+	err = conn.QueryRow(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
+		pgConfig.DBName).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("error checking database existence: %v", err)
+	}
+
+	if !exists {
+		_, err = conn.Exec(context.Background(),
+			fmt.Sprintf("CREATE DATABASE %s", pgConfig.DBName))
+		if err != nil {
+			return fmt.Errorf("error creating database: %v", err)
+		}
+		fmt.Printf("%sDatabase '%s' created successfully%s\n",
+			ColorGreen, pgConfig.DBName, ColorReset)
+	} else {
+		fmt.Printf("%sDatabase '%s' already exists%s\n",
+			ColorBlue, pgConfig.DBName, ColorReset)
+	}
+
+	return nil
+}
+
+// CreateUser creates a new user if it doesn't exist and grants privileges
+func CreateUser(pgConfig *config.PostgresConfig, privileges string) error {
+	// Connect as super user
+	dbURL := fmt.Sprintf("postgres://%s:%s@%s:%s/postgres?sslmode=disable",
+		pgConfig.SuperUser, pgConfig.SuperPass, pgConfig.Host, pgConfig.Port)
+
+	// Use pgx.Connect for admin operations
+	conn, err := pgx.Connect(context.Background(), dbURL)
+	if err != nil {
+		return fmt.Errorf("unable to connect to PostgreSQL: %v", err)
+	}
+	defer conn.Close(context.Background())
+
+	// Check if user exists
+	var exists bool
+	err = conn.QueryRow(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
+		pgConfig.User).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("error checking user existence: %v", err)
+	}
+
+	if !exists {
+		// Create user
+		_, err = conn.Exec(context.Background(),
+			fmt.Sprintf("CREATE USER %s WITH PASSWORD '%s'",
+				pgConfig.User, pgConfig.Password))
+		if err != nil {
+			return fmt.Errorf("error creating user: %v", err)
+		}
+		fmt.Printf("%sUser '%s' created successfully%s\n",
+			ColorGreen, pgConfig.User, ColorReset)
+	} else {
+		fmt.Printf("%sUser '%s' already exists%s\n",
+			ColorBlue, pgConfig.User, ColorReset)
+	}
+
+	// Grant privileges based on the specified level
+	var grantCmd string
+	switch privileges {
+	case "all":
+		grantCmd = fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s",
+			pgConfig.DBName, pgConfig.User)
+	case "read":
+		grantCmd = fmt.Sprintf("GRANT CONNECT, SELECT ON DATABASE %s TO %s",
+			pgConfig.DBName, pgConfig.User)
+	case "write":
+		grantCmd = fmt.Sprintf("GRANT CONNECT, SELECT, INSERT, UPDATE, DELETE ON DATABASE %s TO %s",
+			pgConfig.DBName, pgConfig.User)
+	case "admin":
+		grantCmd = fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s WITH GRANT OPTION",
+			pgConfig.DBName, pgConfig.User)
+	default:
+		return fmt.Errorf("invalid privilege level: %s", privileges)
+	}
+
+	_, err = conn.Exec(context.Background(), grantCmd)
+	if err != nil {
+		return fmt.Errorf("error granting privileges: %v", err)
+	}
+
+	fmt.Printf("%sPrivileges '%s' granted to user '%s' on database '%s'%s\n",
+		ColorGreen, privileges, pgConfig.User, pgConfig.DBName, ColorReset)
+
+	return nil
 }

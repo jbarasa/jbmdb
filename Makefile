@@ -1,114 +1,6 @@
-# PostgreSQL Migrations
-postgres-migration:
-	@if [ -z "$(name)" ]; then \
-		echo "Error: Migration name is required"; \
-		echo "Usage: make postgres-migration name=<migration_name>"; \
-		exit 1; \
-	fi
-	@if echo "$(name)" | grep -q -E 'create_[a-z]+_table' && ! echo "$(name)" | grep -q -E 'create_[a-z]+s_table'; then \
-		echo "Error: Single table names should be plural"; \
-		echo "Example: 'create_user_table' should be 'create_users_table'"; \
-		exit 1; \
-	fi
-	@if echo "$(name)" | grep -q -E 'create_[a-z]+_[a-z]+[^s]_table$$'; then \
-		echo "Error: In relation tables, names after the first word should be plural"; \
-		echo "Example: 'create_user_comment_table' should be 'create_user_comments_table'"; \
-		exit 1; \
-	fi
-	@if ! echo "$(name)" | grep -q '^create_[a-z_]\+_table$$'; then \
-		echo "Error: Migration name must follow format: create_<name>_table"; \
-		echo "Example: create_users_table, create_post_comments_table"; \
-		exit 1; \
-	fi
-	go run ./migrations/main.go postgres-migration $(name)
-
-.PHONY: postgres-migration
-
-postgres-migrate:
-	go run ./migrations/main.go postgres-migrate
-
-.PHONY: postgres-migrate
-
-postgres-rollback:
-	go run ./migrations/main.go postgres-rollback
-
-.PHONY: postgres-rollback
-
-postgres-fresh:
-	go run ./migrations/main.go postgres-fresh
-
-.PHONY: postgres-fresh
-
-postgres-list:
-	go run ./migrations/main.go postgres-list
-
-.PHONY: postgres-list
-
-# ScyllaDB Migrations
-scylla-migration:
-	@if [ -z "$(name)" ]; then \
-		echo "Error: Migration name is required"; \
-		echo "Usage: make scylla-migration name=<migration_name>"; \
-		exit 1; \
-	fi
-	@if echo "$(name)" | grep -q -E 'create_[a-z]+_table' && ! echo "$(name)" | grep -q -E 'create_[a-z]+s_table'; then \
-		echo "Error: Single table names should be plural"; \
-		echo "Example: 'create_user_table' should be 'create_users_table'"; \
-		exit 1; \
-	fi
-	@if echo "$(name)" | grep -q -E 'create_[a-z]+_[a-z]+[^s]_table$$'; then \
-		echo "Error: In relation tables, names after the first word should be plural"; \
-		echo "Example: 'create_user_comment_table' should be 'create_user_comments_table'"; \
-		exit 1; \
-	fi
-	@if ! echo "$(name)" | grep -q '^create_[a-z_]\+_table$$'; then \
-		echo "Error: Migration name must follow format: create_<name>_table"; \
-		echo "Example: create_users_table, create_post_comments_table"; \
-		exit 1; \
-	fi
-	go run ./migrations/main.go scylla-migration $(name)
-
-.PHONY: scylla-migration
-
-scylla-migrate:
-	go run ./migrations/main.go scylla-migrate
-
-.PHONY: scylla-migrate
-
-scylla-rollback:
-	go run ./migrations/main.go scylla-rollback
-
-.PHONY: scylla-rollback
-
-scylla-fresh:
-	go run ./migrations/main.go scylla-fresh
-
-.PHONY: scylla-fresh
-
-scylla-list:
-	go run ./migrations/main.go scylla-list
-
-.PHONY: scylla-list
-
-# Configuration
-postgres-init:
-	go run ./migrations/main.go postgres-init
-
-.PHONY: postgres-init
-
-scylla-init:
-	go run ./migrations/main.go scylla-init
-
-.PHONY: scylla-init
-
-config:
-	go run ./migrations/main.go config
-
-.PHONY: config
-
 # Cross-platform builds
 BINARY_NAME=jbmdb
-VERSION=1.0.0
+VERSION=2.0.0
 BUILD_DIR=build
 BUILD_FLAGS=-ldflags="-X main.Version=$(VERSION)"
 
@@ -140,12 +32,33 @@ version:
 
 # Test the binary
 test: build-linux
-	@echo "Testing PostgreSQL commands..."
+	@echo "Testing command execution (no database connections)..."
+	@echo "\nTesting configuration..."
 	./$(BUILD_DIR)/$(BINARY_NAME)-linux config
-	./$(BUILD_DIR)/$(BINARY_NAME)-linux postgres-init
-	./$(BUILD_DIR)/$(BINARY_NAME)-linux postgres-make create_tests_table
-	./$(BUILD_DIR)/$(BINARY_NAME)-linux postgres-list
-	@echo "\nTesting ScyllaDB commands..."
-	./$(BUILD_DIR)/$(BINARY_NAME)-linux scylla-init
-	./$(BUILD_DIR)/$(BINARY_NAME)-linux scylla-migration create_tests_table
-	./$(BUILD_DIR)/$(BINARY_NAME)-linux scylla-list
+
+	@echo "\nTesting PostgreSQL user and database management..."
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux postgres-create-user:read
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux postgres-create-db
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux postgres-grant:read
+	@echo "\nTesting PostgreSQL migration commands..."
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux postgres-migration create_tests_table
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux postgres-list || true
+
+	@echo "\nTesting MySQL user and database management..."
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux mysql-create-user:read
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux mysql-create-db
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux mysql-grant:read
+	@echo "\nTesting MySQL migration commands..."
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux mysql-migration create_tests_table
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux mysql-list || true
+
+	@echo "\nTesting CQL keyspace and user management..."
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux cql-create-keyspace:SimpleStrategy:3
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux cql-create-user:read
+	@echo "\nTesting CQL migration commands..."
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux cql-migration create_tests_table
+	./$(BUILD_DIR)/$(BINARY_NAME)-linux cql-list || true
+
+	@echo "\nVerifying directory structure..."
+	@ls -R $(shell pwd)/psql/sql $(shell pwd)/squel/sql $(shell pwd)/cassy/cql || true
+	@echo "\nTest completed successfully!"

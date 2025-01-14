@@ -1,4 +1,4 @@
-package scylladb
+package cql
 
 import (
 	"fmt"
@@ -10,20 +10,169 @@ import (
 	"unicode"
 
 	"github.com/gocql/gocql"
+	"github.com/jbarasa/jbmdb/migrations/config"
 )
 
-// Color codes for terminal output
+// Color constants for terminal output
 const (
-	ColorReset  = "\033[0m"
 	ColorRed    = "\033[31m"
 	ColorGreen  = "\033[32m"
-	ColorYellow = "\033[33m"
 	ColorBlue   = "\033[34m"
 	ColorPurple = "\033[35m"
 	ColorCyan   = "\033[36m"
-	ColorWhite  = "\033[37m"
+	ColorGray   = "\033[37m"
 	ColorBold   = "\033[1m"
+	ColorReset  = "\033[0m"
+	ColorYellow = "\033[33m"
 )
+
+// CreateKeyspace creates a new keyspace if it doesn't exist
+func CreateKeyspace(cqlConfig *config.ScyllaConfig, replicationStrategy string, replicationFactor int) error {
+	// Connect to Cassandra/ScyllaDB cluster
+	cluster := gocql.NewCluster(cqlConfig.Hosts...)
+	cluster.Port = cqlConfig.Port
+	cluster.Authenticator = gocql.PasswordAuthenticator{
+		Username: cqlConfig.SuperUser,
+		Password: cqlConfig.SuperPass,
+	}
+	
+	// Set consistency level if specified
+	if cqlConfig.Consistency != "" {
+		level, err := gocql.ParseConsistencyWrapper(cqlConfig.Consistency)
+		if err != nil {
+			return fmt.Errorf("invalid consistency level: %v", err)
+		}
+		cluster.Consistency = level
+	} else {
+		cluster.Consistency = gocql.Quorum
+	}
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		return fmt.Errorf("error connecting to cluster: %v", err)
+	}
+	defer session.Close()
+
+	// Check if keyspace exists
+	var count int
+	if err := session.Query(
+		"SELECT COUNT(*) FROM system_schema.keyspaces WHERE keyspace_name = ?",
+		cqlConfig.Keyspace).Scan(&count); err != nil {
+		return fmt.Errorf("error checking keyspace existence: %v", err)
+	}
+
+	if count == 0 {
+		// Create keyspace with specified replication strategy
+		var query string
+		switch replicationStrategy {
+		case "SimpleStrategy":
+			query = fmt.Sprintf(
+				"CREATE KEYSPACE %s WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': %d}",
+				cqlConfig.Keyspace, replicationFactor)
+		case "NetworkTopologyStrategy":
+			if cqlConfig.Datacenter == "" {
+				return fmt.Errorf("datacenter must be specified for NetworkTopologyStrategy")
+			}
+			query = fmt.Sprintf(
+				"CREATE KEYSPACE %s WITH REPLICATION = {'class': 'NetworkTopologyStrategy', '%s': %d}",
+				cqlConfig.Keyspace, cqlConfig.Datacenter, replicationFactor)
+		default:
+			return fmt.Errorf("unsupported replication strategy: %s", replicationStrategy)
+		}
+
+		if err := session.Query(query).Exec(); err != nil {
+			return fmt.Errorf("error creating keyspace: %v", err)
+		}
+
+		fmt.Printf("%sKeyspace '%s' created successfully with %s (RF: %d)%s\n",
+			ColorGreen, cqlConfig.Keyspace, replicationStrategy, replicationFactor, ColorReset)
+	} else {
+		fmt.Printf("%sKeyspace '%s' already exists%s\n",
+			ColorBlue, cqlConfig.Keyspace, ColorReset)
+	}
+
+	return nil
+}
+
+// CreateUser creates a new user if it doesn't exist and grants privileges
+func CreateUser(cqlConfig *config.ScyllaConfig, privileges string) error {
+	// Connect to Cassandra/ScyllaDB cluster
+	cluster := gocql.NewCluster(cqlConfig.Hosts...)
+	cluster.Port = cqlConfig.Port
+	cluster.Authenticator = gocql.PasswordAuthenticator{
+		Username: cqlConfig.SuperUser,
+		Password: cqlConfig.SuperPass,
+	}
+	
+	// Set consistency level if specified
+	if cqlConfig.Consistency != "" {
+		level, err := gocql.ParseConsistencyWrapper(cqlConfig.Consistency)
+		if err != nil {
+			return fmt.Errorf("invalid consistency level: %v", err)
+		}
+		cluster.Consistency = level
+	} else {
+		cluster.Consistency = gocql.Quorum
+	}
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		return fmt.Errorf("error connecting to cluster: %v", err)
+	}
+	defer session.Close()
+
+	// Check if user exists
+	var count int
+	if err := session.Query(
+		"SELECT COUNT(*) FROM system_auth.roles WHERE role = ?",
+		cqlConfig.User).Scan(&count); err != nil {
+		return fmt.Errorf("error checking user existence: %v", err)
+	}
+
+	if count == 0 {
+		// Create user
+		if err := session.Query(
+			fmt.Sprintf("CREATE USER %s WITH PASSWORD '%s' NOSUPERUSER",
+				cqlConfig.User, cqlConfig.Password)).Exec(); err != nil {
+			return fmt.Errorf("error creating user: %v", err)
+		}
+
+		fmt.Printf("%sUser '%s' created successfully%s\n",
+			ColorGreen, cqlConfig.User, ColorReset)
+	} else {
+		fmt.Printf("%sUser '%s' already exists%s\n",
+			ColorBlue, cqlConfig.User, ColorReset)
+	}
+
+	// Grant privileges based on the specified level
+	var grantCmd string
+	switch privileges {
+	case "read":
+		grantCmd = fmt.Sprintf("GRANT SELECT ON KEYSPACE %s TO %s",
+			cqlConfig.Keyspace, cqlConfig.User)
+	case "write":
+		grantCmd = fmt.Sprintf(
+			"GRANT SELECT, MODIFY ON KEYSPACE %s TO %s",
+			cqlConfig.Keyspace, cqlConfig.User)
+	case "all":
+		grantCmd = fmt.Sprintf("GRANT ALL PERMISSIONS ON KEYSPACE %s TO %s",
+			cqlConfig.Keyspace, cqlConfig.User)
+	case "admin":
+		grantCmd = fmt.Sprintf("GRANT ALL PERMISSIONS ON ALL KEYSPACES TO %s",
+			cqlConfig.User)
+	default:
+		return fmt.Errorf("invalid privilege level: %s", privileges)
+	}
+
+	if err := session.Query(grantCmd).Exec(); err != nil {
+		return fmt.Errorf("error granting privileges: %v", err)
+	}
+
+	fmt.Printf("%sPrivileges '%s' granted to user '%s' on keyspace '%s'%s\n",
+		ColorGreen, privileges, cqlConfig.User, cqlConfig.Keyspace, ColorReset)
+
+	return nil
+}
 
 // Migration represents a database migration with its version, name, and CQL scripts for
 // applying and rolling back the migration.
@@ -75,12 +224,35 @@ func camelToSnakeCase(s string) string {
 	return result.String()
 }
 
+// checkDuplicateTableName checks if a migration with the same table name already exists
+func checkDuplicateTableName(newTableName string) error {
+	migrations, err := loadMigrations()
+	if err != nil {
+		return fmt.Errorf("failed to load migrations: %w", err)
+	}
+
+	for _, migration := range migrations {
+		existingTableName := extractTableName(migration.Name)
+		if strings.EqualFold(existingTableName, newTableName) {
+			return fmt.Errorf("%stable name '%s' already exists in migration '%d_%s'%s",
+				ColorRed, newTableName, migration.Version, migration.Name, ColorReset)
+		}
+	}
+	return nil
+}
+
 // CreateMigration creates new migration file with the given name and current timestamp.
 func CreateMigration(name string) error {
+	// Extract table name from migration name
+	tableName := extractTableName(name)
+
+	// Check for duplicate table names
+	if err := checkDuplicateTableName(tableName); err != nil {
+		return err
+	}
+
 	timestamp := time.Now().Format("20060102150405")
 	filename := fmt.Sprintf("%s_%s.cql", timestamp, name)
-
-	tableName := extractTableName(name)
 
 	content := fmt.Sprintf(`-- Migration: %s
 
@@ -245,6 +417,87 @@ func RollbackLast(session *gocql.Session) error {
 	return nil
 }
 
+// RollbackSteps rolls back a specified number of migrations
+func RollbackSteps(session *gocql.Session, steps int) error {
+	// Get all applied migrations
+	appliedMigrations, err := getAppliedMigrations(session)
+	if err != nil {
+		return fmt.Errorf("failed to get applied migrations: %w", err)
+	}
+
+	if len(appliedMigrations) == 0 {
+		fmt.Printf("%sNo migrations to rollback%s\n", ColorYellow, ColorReset)
+		return nil
+	}
+
+	// Sort migrations by version in descending order
+	sort.Slice(appliedMigrations, func(i, j int) bool {
+		return appliedMigrations[i].Version > appliedMigrations[j].Version
+	})
+
+	// Limit steps to available migrations
+	if steps > len(appliedMigrations) {
+		steps = len(appliedMigrations)
+		fmt.Printf("%sNote: Only %d migrations available to rollback%s\n",
+			ColorYellow, steps, ColorReset)
+	}
+
+	// Rollback each migration
+	for i := 0; i < steps; i++ {
+		migration := appliedMigrations[i]
+		fmt.Printf("%s[ROLLBACK]%s Rolling back migration %s%d_%s%s... ",
+			ColorBlue, ColorReset, ColorCyan, migration.Version, migration.Name, ColorReset)
+
+		if err := rollbackMigration(session, migration); err != nil {
+			fmt.Printf("%sFAILED%s\n", ColorRed, ColorReset)
+			return fmt.Errorf("failed to rollback migration %d_%s: %w",
+				migration.Version, migration.Name, err)
+		}
+
+		fmt.Printf("%sDONE%s\n", ColorGreen, ColorReset)
+	}
+
+	return nil
+}
+
+// getAppliedMigrations returns all applied migrations from the database
+func getAppliedMigrations(session *gocql.Session) ([]Migration, error) {
+	var migrations []Migration
+
+	iter := session.Query(`SELECT version, name FROM migrations`).Iter()
+	var version int64
+	var name string
+
+	for iter.Scan(&version, &name) {
+		// Load migration file content
+		filename := fmt.Sprintf("%d_%s.cql", version, name)
+		filePath := filepath.Join(migrationPath, "cql", filename)
+
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read migration file %s: %w", filename, err)
+		}
+
+		// Split content into up and down migrations
+		parts := strings.Split(string(content), "-- Down Migration")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid migration format in file %s", filename)
+		}
+
+		migrations = append(migrations, Migration{
+			Version: version,
+			Name:    name,
+			DownCQL: strings.TrimSpace(parts[1]),
+		})
+	}
+
+	if err := iter.Close(); err != nil {
+		return nil, fmt.Errorf("error iterating migrations: %w", err)
+	}
+
+	return migrations, nil
+}
+
 // createMigrationsTable creates the migrations table if it doesn't exist.
 // This table keeps track of the applied migrations.
 func createMigrationsTable(session *gocql.Session) error {
@@ -310,10 +563,9 @@ func applyMigration(session *gocql.Session, migration Migration) error {
 	return nil
 }
 
-// rollbackMigration rolls back a single migration.
-// It executes the DownCQL script and removes the migration record from the migrations table.
+// rollbackMigration rolls back a single migration
 func rollbackMigration(session *gocql.Session, migration Migration) error {
-	// Split the DownCQL script into individual statements
+	// Split the down migration into individual statements
 	statements := strings.Split(migration.DownCQL, ";")
 
 	for _, stmt := range statements {
@@ -321,17 +573,18 @@ func rollbackMigration(session *gocql.Session, migration Migration) error {
 		if stmt == "" {
 			continue
 		}
-		// Execute each statement in the DownCQL script
+
+		// Execute each statement
 		if err := session.Query(stmt).Exec(); err != nil {
-			return fmt.Errorf("failed to rollback migration %d_%s: %w", migration.Version, migration.Name, err)
+			return fmt.Errorf("failed to execute down migration: %w", err)
 		}
 	}
 
-	// Remove the migration record from the migrations table
+	// Remove migration record
 	if err := session.Query(`
 		DELETE FROM migrations WHERE version = ?
 	`, migration.Version).Exec(); err != nil {
-		return fmt.Errorf("failed to remove migration record %d_%s: %w", migration.Version, migration.Name, err)
+		return fmt.Errorf("failed to remove migration record: %w", err)
 	}
 
 	return nil

@@ -1,95 +1,69 @@
 // Package main provides a command-line tool for managing database migrations
 // migrations, applying migrations, rolling them back, listing migrations, and performing fresh migrations.
-// It supports both PostgreSQL and ScyllaDB Keyspaces.
-
-// main.go
-// ├── loadConfig() -> sets migration paths
-// ├── handlePostgres()
-// │   ├── make -> creates new migration
-// │   ├── migrate -> applies migrations
-// │   ├── rollback -> rolls back last migration
-// │   ├── fresh -> drops all and remigrates
-// │   ├── list -> shows migration status
-// │   └── init -> initializes config
-// └── handleScylla()
-//     ├── make -> creates new migration
-//     ├── migrate -> applies migrations
-//     ├── rollback -> rolls back last migration
-//     ├── fresh -> drops all and reapply migrations
-//     ├── list -> shows migration status
-//     └── init -> initializes config
-//
-// Developer: Joseph Barasa
-// Year: 2024
-// Developer's Website: jbarasa.com
-// License: Jbarasa INC
+// It supports PostgreSQL, MySQL/MariaDB, and Cassandra/ScyllaDB databases.
 
 package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gocql/gocql"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jbarasa/jbmdb/migrations/config"
+	"github.com/jbarasa/jbmdb/migrations/cql"
+	"github.com/jbarasa/jbmdb/migrations/mysql"
 	"github.com/jbarasa/jbmdb/migrations/postgres"
-	"github.com/jbarasa/jbmdb/migrations/scylladb"
 	"github.com/jbarasa/jbmdb/migrations/update"
-	"github.com/joho/godotenv"
 )
 
-const DefaultConfigFile = ".jbmdb.conf"
+const (
+	// Color codes
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+	colorPurple = "\033[35m"
+	colorCyan   = "\033[36m"
+	colorWhite  = "\033[37m"
+
+	// Text styles
+	textBold      = "\033[1m"
+	textUnderline = "\033[4m"
+)
 
 // Version is set during build time
 var Version = "dev"
 
-// Configuration structure
-type Config struct {
-	PostgresPath string // Path for PostgreSQL migrations
-	ScyllaPath   string // Path for ScyllaDB migrations
-	SQLFolder    string // Folder name for SQL files
-	CQLFolder    string // Folder name for CQL files
-}
-
-// Global configuration
-var config Config
-
 func main() {
 	// Load environment variables
-	godotenv.Load()
-
-	// Load or create configuration
-	loadConfig()
+	// godotenv.Load()
 
 	if len(os.Args) < 2 {
 		showUsage()
 		os.Exit(1)
 	}
-	// Parse command-line flags.
 
+	// Parse command-line flags
 	flag.Parse()
-
 	command := flag.Arg(0)
 
-	// Check for config command first
-	if command == "config" {
-		handleConfig()
+	// Handle special commands first
+	switch command {
+	case "config":
+		initConfig()
 		return
-	}
-
-	// Check for update command
-	if command == "update" {
+	case "update":
 		handleUpdate()
 		return
-	}
-
-	// Check for version command
-	if command == "version" {
+	case "version":
 		fmt.Printf("jbmdb version %s\n", Version)
 		return
 	}
@@ -107,534 +81,599 @@ func main() {
 	switch dbType {
 	case "postgres":
 		handlePostgres(action)
-	case "scylla":
+	case "cql", "cassandra":
 		handleScylla(action)
+	case "mysql":
+		handleMySQL(action)
 	default:
-		fmt.Printf("%sError: Invalid database type. Use 'postgres' or 'scylla'%s\n", postgres.ColorRed, postgres.ColorReset)
+		fmt.Printf("%sError: Invalid database type. Use 'postgres', 'mysql', or 'cql'%s\n",
+			postgres.ColorRed, postgres.ColorReset)
 		os.Exit(1)
 	}
 }
 
-func showUsage() {
-	fmt.Printf("\n%s%sJBMDB Database Migration Tool%s\n\n", postgres.ColorBold, postgres.ColorBlue, postgres.ColorReset)
-	fmt.Println("Usage: jbmdb <command> [args]")
-	fmt.Println("\nCommands:")
-	fmt.Printf("  %sConfiguration:%s\n", postgres.ColorCyan, postgres.ColorReset)
-	fmt.Printf("    config              Configure migration paths and folder names\n")
-	fmt.Printf("    update              Check for and install updates\n")
-	fmt.Printf("    version             Show version information\n")
-	fmt.Printf("\n  %sPostgreSQL:%s\n", postgres.ColorCyan, postgres.ColorReset)
-	fmt.Printf("    postgres-migration <name>   Create a new PostgreSQL migration\n")
-	fmt.Printf("    postgres-migrate       Run all pending PostgreSQL migrations\n")
-	fmt.Printf("    postgres-rollback      Rollback the last PostgreSQL migration\n")
-	fmt.Printf("    postgres-fresh         Drop all tables and reapply PostgreSQL migrations\n")
-	fmt.Printf("    postgres-list          List all PostgreSQL migrations\n")
-	fmt.Printf("    postgres-init          Initialize PostgreSQL configuration\n")
-	fmt.Printf("\n  %sScyllaDB:%s\n", postgres.ColorCyan, postgres.ColorReset)
-	fmt.Printf("    scylla-migration <name>     Create a new ScyllaDB migration\n")
-	fmt.Printf("    scylla-migrate         Run all pending ScyllaDB migrations\n")
-	fmt.Printf("    scylla-rollback        Rollback the last ScyllaDB migration\n")
-	fmt.Printf("    scylla-fresh           Drop all tables and reapply ScyllaDB migrations\n")
-	fmt.Printf("    scylla-list            List all ScyllaDB migrations\n")
-	fmt.Printf("    scylla-init            Initialize ScyllaDB configuration\n\n")
-
-	fmt.Printf("Current Configuration:\n")
-	fmt.Printf("  PostgreSQL migrations: %s%s/%s%s\n", postgres.ColorCyan, config.PostgresPath, config.SQLFolder, postgres.ColorReset)
-	fmt.Printf("  ScyllaDB migrations:   %s%s/%s%s\n\n", postgres.ColorCyan, config.ScyllaPath, config.CQLFolder, postgres.ColorReset)
-}
-
-func handleConfig() {
-	fmt.Printf("\n%s%sJBMDB Configuration%s\n\n", postgres.ColorBold, postgres.ColorBlue, postgres.ColorReset)
-
-	// PostgreSQL configuration
-	fmt.Printf("%sPostgreSQL Migrations Path%s [%s]: ", postgres.ColorCyan, postgres.ColorReset, config.PostgresPath)
-	postgresPath := readInput(config.PostgresPath)
-
-	fmt.Printf("%sSQL Files Folder Name%s [%s]: ", postgres.ColorCyan, postgres.ColorReset, config.SQLFolder)
-	sqlFolder := readInput(config.SQLFolder)
-
-	// ScyllaDB configuration
-	fmt.Printf("%sScyllaDB Migrations Path%s [%s]: ", postgres.ColorCyan, postgres.ColorReset, config.ScyllaPath)
-	scyllaPath := readInput(config.ScyllaPath)
-
-	fmt.Printf("%sCQL Files Folder Name%s [%s]: ", postgres.ColorCyan, postgres.ColorReset, config.CQLFolder)
-	cqlFolder := readInput(config.CQLFolder)
-
-	// Update configuration
-	config = Config{
-		PostgresPath: postgresPath,
-		ScyllaPath:   scyllaPath,
-		SQLFolder:    sqlFolder,
-		CQLFolder:    cqlFolder,
+func handlePostgres(action string) {
+	pgConfig, err := config.LoadConfig[config.PostgresConfig]("postgres")
+	if err != nil {
+		log.Fatalf("%sError loading PostgreSQL config: %v%s\n",
+			postgres.ColorRed, err, postgres.ColorReset)
 	}
 
-	// Save configuration
-	saveConfig()
+	// Set migration path
+	postgres.SetMigrationPath(pgConfig.MigrationPath)
 
-	// Create directories
-	createMigrationDirs()
-
-	fmt.Printf("\n%sConfiguration saved successfully!%s\n", postgres.ColorGreen, postgres.ColorReset)
-}
-
-func readInput(defaultValue string) string {
-	var input string
-	fmt.Scanln(&input)
-	if input == "" {
-		return defaultValue
-	}
-	return input
-}
-
-func loadConfig() {
-	// Default configuration
-	config = Config{
-		PostgresPath: "migrations/postgres/migrations",
-		ScyllaPath:   "migrations/scylladb/migrations",
-		SQLFolder:    "sql",
-		CQLFolder:    "cql",
-	}
-
-	// Try to load existing configuration
-	data, err := os.ReadFile(DefaultConfigFile)
-	if err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
-
-			switch key {
-			case "POSTGRES_PATH":
-				config.PostgresPath = value
-			case "SCYLLA_PATH":
-				config.ScyllaPath = value
-			case "SQL_FOLDER":
-				config.SQLFolder = value
-			case "CQL_FOLDER":
-				config.CQLFolder = value
-			}
+	// Handle different actions
+	switch {
+	case action == "init":
+		initPostgresConfig()
+		return
+	case action == "create-db":
+		if err := postgres.CreateDatabase(pgConfig); err != nil {
+			log.Fatalf("%s%v%s\n", postgres.ColorRed, err, postgres.ColorReset)
 		}
+		return
+	case strings.HasPrefix(action, "create-user"):
+		parts := strings.Split(action, ":")
+		if len(parts) != 2 {
+			log.Fatalf("%sUsage: postgres-create-user:[read|write|all|admin]%s\n",
+				postgres.ColorRed, postgres.ColorReset)
+		}
+		if err := postgres.CreateUser(pgConfig, parts[1]); err != nil {
+			log.Fatalf("%s%v%s\n", postgres.ColorRed, err, postgres.ColorReset)
+		}
+		return
+	case strings.HasPrefix(action, "rollback"):
+		handlePostgresRollback(action, pgConfig)
+		return
 	}
 
-	// Set the migration paths in the respective packages
-	postgres.SetMigrationPath(config.PostgresPath)
-	scylladb.SetMigrationPath(config.ScyllaPath)
-}
+	// Connect to database
+	dbURL := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		pgConfig.User, pgConfig.Password, pgConfig.Host, pgConfig.Port, pgConfig.DBName)
 
-func saveConfig() {
-	content := fmt.Sprintf("POSTGRES_PATH=%s\nSCYLLA_PATH=%s\nSQL_FOLDER=%s\nCQL_FOLDER=%s\n",
-		config.PostgresPath,
-		config.ScyllaPath,
-		config.SQLFolder,
-		config.CQLFolder,
-	)
-
-	if err := os.WriteFile(DefaultConfigFile, []byte(content), 0644); err != nil {
-		fmt.Printf("%sError saving configuration: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
-		os.Exit(1)
-	}
-}
-
-func createMigrationDirs() {
-	// Create PostgreSQL migrations directory
-	postgresDir := filepath.Join(config.PostgresPath, config.SQLFolder)
-	if err := os.MkdirAll(postgresDir, 0755); err != nil {
-		fmt.Printf("%sError creating PostgreSQL migrations directory: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
-		os.Exit(1)
-	}
-
-	// Create ScyllaDB migrations directory
-	scyllaDir := filepath.Join(config.ScyllaPath, config.CQLFolder)
-	if err := os.MkdirAll(scyllaDir, 0755); err != nil {
-		fmt.Printf("%sError creating ScyllaDB migrations directory: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
-		os.Exit(1)
-	}
-}
-
-func handlePostgres(command string) {
-	// Set the migration path from config
-	postgres.SetMigrationPath(config.PostgresPath)
-
-	// Construct database connection URL
-	dbURL := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		os.Getenv("POSTGRES_HOST"),
-		os.Getenv("POSTGRES_PORT"),
-		os.Getenv("POSTGRES_USER"),
-		os.Getenv("POSTGRES_PASSWORD"),
-		os.Getenv("POSTGRES_DATABASE_NAME"),
-	)
-
-	// Create connection pool
 	db, err := pgxpool.New(context.Background(), dbURL)
 	if err != nil {
-		log.Fatalf("%sUnable to connect to PostgreSQL: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
+		log.Fatalf("%sUnable to connect to PostgreSQL: %v%s\n",
+			postgres.ColorRed, err, postgres.ColorReset)
 	}
 	defer db.Close()
 
-	// Handle commands
-	switch command {
+	// Handle other actions
+	switch action {
 	case "migration":
-		// Call your existing PostgreSQL migration migration function
-		// Ensure a migration name is provided as an argument.
 		if flag.NArg() < 2 {
-			fmt.Printf("%sError: Migration name is required%s\n", postgres.ColorRed, postgres.ColorReset)
+			fmt.Printf("%sError: Migration name is required%s\n",
+				postgres.ColorRed, postgres.ColorReset)
 			os.Exit(1)
 		}
 		name := flag.Arg(1)
-
-		// Validate migration name format
-		if !strings.HasPrefix(name, "create_") || !strings.HasSuffix(name, "_table") {
-			fmt.Printf("%sError: Migration name must follow format: create_<name>_table\n", postgres.ColorRed)
-			fmt.Printf("Example: create_users_table, create_post_comments_table%s\n", postgres.ColorReset)
-			os.Exit(1)
-		}
-
-		// Check for singular table names
-		tableName := strings.TrimPrefix(name, "create_")
-		tableName = strings.TrimSuffix(tableName, "_table")
-		parts := strings.Split(tableName, "_")
-
-		if len(parts) == 1 && !strings.HasSuffix(parts[0], "s") {
-			fmt.Printf("%sError: Single table names should be plural\n", postgres.ColorRed)
-			fmt.Printf("Example: 'create_user_table' should be 'create_users_table'%s\n", postgres.ColorReset)
-			os.Exit(1)
-		}
-
-		// Check for plural in relation tables
-		if len(parts) > 1 && !strings.HasSuffix(parts[len(parts)-1], "s") {
-			fmt.Printf("%sError: In relation tables, names after the first word should be plural\n", postgres.ColorRed)
-			fmt.Printf("Example: 'create_user_comment_table' should be 'create_user_comments_table'%s\n", postgres.ColorReset)
-			os.Exit(1)
-		}
-
-		// Create a new migration with the specified name.
+		validateMigrationName(name)
 		if err := postgres.CreateMigration(name); err != nil {
-			fmt.Printf("%sFailed to create migration: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
-			os.Exit(1)
+			log.Fatalf("%sFailed to create migration: %v%s\n",
+				postgres.ColorRed, err, postgres.ColorReset)
 		}
 
 	case "migrate":
-		// Apply all pending migrations to the database.
 		if err := postgres.Migrate(db); err != nil {
-			log.Fatalf("%sFailed to run migrations: %v%s", postgres.ColorRed, err, postgres.ColorReset)
+			log.Fatalf("%sFailed to run migrations: %v%s\n",
+				postgres.ColorRed, err, postgres.ColorReset)
 		}
-		fmt.Printf("%sMigrations completed successfully%s\n", postgres.ColorGreen, postgres.ColorReset)
-	case "rollback":
-		// Rollback the last applied migration from the database.
-		if err := postgres.RollbackLast(db); err != nil {
-			log.Fatalf("%sFailed to rollback migration: %v%s", postgres.ColorRed, err, postgres.ColorReset)
-		}
-		fmt.Printf("%sRollback completed successfully%s\n", postgres.ColorGreen, postgres.ColorReset)
+		fmt.Printf("%sMigrations completed successfully%s\n",
+			postgres.ColorGreen, postgres.ColorReset)
+
 	case "fresh":
-		fmt.Printf("%s[WARNING]%s This will drop all tables and reapply all migrations.\n", postgres.ColorRed, postgres.ColorReset)
-		fmt.Printf("Are you sure you want to continue? (y/N): ")
-
-		var response string
-		fmt.Scanln(&response)
-
-		if strings.ToLower(response) != "y" {
-			fmt.Printf("%sOperation cancelled%s\n", postgres.ColorYellow, postgres.ColorReset)
-			os.Exit(0)
-		}
-
+		confirmFreshMigration()
 		if err := postgres.MigrateFresh(db); err != nil {
-			fmt.Printf("%sFailed to run fresh migrations: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
-			os.Exit(1)
+			log.Fatalf("%sFailed to run fresh migrations: %v%s\n",
+				postgres.ColorRed, err, postgres.ColorReset)
 		}
-		fmt.Printf("%sFresh migration completed successfully%s\n", postgres.ColorGreen, postgres.ColorReset)
+		fmt.Printf("%sFresh migration completed successfully%s\n",
+			postgres.ColorGreen, postgres.ColorReset)
+
 	case "list":
-		// List all migrations and their status.
 		if err := postgres.ListMigrations(db); err != nil {
-			fmt.Printf("%sFailed to list migrations: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
-			os.Exit(1)
+			log.Fatalf("%sFailed to list migrations: %v%s\n",
+				postgres.ColorRed, err, postgres.ColorReset)
 		}
-	case "init":
-		initPostgresConfig()
 
 	default:
-		fmt.Printf("%sError: Unknown command: %s%s\n", postgres.ColorRed, command, postgres.ColorReset)
+		fmt.Printf("%sError: Unknown command: %s%s\n",
+			postgres.ColorRed, action, postgres.ColorReset)
 		os.Exit(1)
 	}
 }
 
-func handleScylla(command string) {
-	// Set the migration path from config
-	scylladb.SetMigrationPath(config.ScyllaPath)
+func handlePostgresRollback(action string, pgConfig *config.PostgresConfig) {
+	// Parse rollback steps
+	parts := strings.Split(action, ":")
+	steps := 1 // Default to 1 step
 
-	// Get ScyllaDB hosts
-	hosts := strings.Split(os.Getenv("SCYLLA_HOSTS"), ",")
-
-	// Create ScyllaDB session
-	cluster := gocql.NewCluster(hosts...)
-	cluster.Keyspace = os.Getenv("SCYLLA_KEYSPACE")
-	cluster.Authenticator = gocql.PasswordAuthenticator{
-		Username: os.Getenv("SCYLLA_USER"),
-		Password: os.Getenv("SCYLLA_PASSWORD"),
+	if len(parts) > 1 {
+		if parts[1] == "all" {
+			steps = -1 // Special case for rolling back all migrations
+		} else {
+			var err error
+			steps, err = strconv.Atoi(parts[1])
+			if err != nil || steps < 1 {
+				log.Fatalf("%sInvalid rollback steps: %s%s\n",
+					postgres.ColorRed, parts[1], postgres.ColorReset)
+			}
+		}
 	}
-	cluster.Consistency = gocql.LocalOne
+
+	// Connect to database
+	dbURL := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		pgConfig.User, pgConfig.Password, pgConfig.Host, pgConfig.Port, pgConfig.DBName)
+
+	db, err := pgxpool.New(context.Background(), dbURL)
+	if err != nil {
+		log.Fatalf("%sUnable to connect to PostgreSQL: %v%s\n",
+			postgres.ColorRed, err, postgres.ColorReset)
+	}
+	defer db.Close()
+
+	// Handle rollback
+	if err := postgres.RollbackSteps(db, steps); err != nil {
+		log.Fatalf("%sFailed to rollback migrations: %v%s\n",
+			postgres.ColorRed, err, postgres.ColorReset)
+	}
+
+	if steps == -1 {
+		fmt.Printf("%sRolled back all migrations successfully%s\n",
+			postgres.ColorGreen, postgres.ColorReset)
+	} else {
+		fmt.Printf("%sRolled back %d migration(s) successfully%s\n",
+			postgres.ColorGreen, steps, postgres.ColorReset)
+	}
+}
+
+func handleScylla(action string) {
+	scyllaConfig, err := config.LoadConfig[config.ScyllaConfig]("cql")
+	if err != nil {
+		log.Fatalf("%sError loading CQL database config: %v%s\n",
+			postgres.ColorRed, err, postgres.ColorReset)
+	}
+
+	switch {
+	case action == "init":
+		initScyllaConfig()
+		return
+	case strings.HasPrefix(action, "create-keyspace"):
+		parts := strings.Split(action, ":")
+		if len(parts) != 3 {
+			log.Fatalf("%sUsage: cql-create-keyspace:[SimpleStrategy|NetworkTopologyStrategy]:[replication_factor]%s\n",
+				cql.ColorRed, cql.ColorReset)
+		}
+		strategy := parts[1]
+		factor, err := strconv.Atoi(parts[2])
+		if err != nil {
+			log.Fatalf("%sInvalid replication factor: %v%s\n",
+				cql.ColorRed, err, cql.ColorReset)
+		}
+		if err := cql.CreateKeyspace(scyllaConfig, strategy, factor); err != nil {
+			log.Fatalf("%s%v%s\n", cql.ColorRed, err, cql.ColorReset)
+		}
+		return
+	case strings.HasPrefix(action, "create-user"):
+		parts := strings.Split(action, ":")
+		if len(parts) != 2 {
+			log.Fatalf("%sUsage: cql-create-user:[read|write|all|admin]%s\n",
+				cql.ColorRed, cql.ColorReset)
+		}
+		if err := cql.CreateUser(scyllaConfig, parts[1]); err != nil {
+			log.Fatalf("%s%v%s\n", cql.ColorRed, err, cql.ColorReset)
+		}
+		return
+	case strings.HasPrefix(action, "rollback"):
+		handleScyllaRollback(action, scyllaConfig)
+		return
+	}
+
+	// Create CQL session
+	cluster := gocql.NewCluster(scyllaConfig.Hosts...)
+	cluster.Keyspace = scyllaConfig.Keyspace
+	cluster.Consistency = gocql.Quorum
+	cluster.ProtoVersion = 4
+	if scyllaConfig.User != "" {
+		cluster.Authenticator = gocql.PasswordAuthenticator{
+			Username: scyllaConfig.User,
+			Password: scyllaConfig.Password,
+		}
+	}
 
 	session, err := cluster.CreateSession()
 	if err != nil {
-		log.Fatalf("%sUnable to connect to ScyllaDB: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
+		log.Fatalf("%sUnable to connect to CQL database: %v%s\n",
+			postgres.ColorRed, err, postgres.ColorReset)
 	}
 	defer session.Close()
 
 	// Handle commands
-	switch command {
+	switch action {
 	case "migration":
-		// Call your existing ScyllaDB migration migration function
-		// Ensure a migration name is provided as an argument.
 		if flag.NArg() < 2 {
-			fmt.Printf("%sError: Migration name is required%s\n", scylladb.ColorRed, scylladb.ColorReset)
+			fmt.Printf("%sError: Migration name is required%s\n",
+				postgres.ColorRed, postgres.ColorReset)
 			os.Exit(1)
 		}
 		name := flag.Arg(1)
-		// Validate migration name format
-		if !strings.HasPrefix(name, "create_") || !strings.HasSuffix(name, "_table") {
-			fmt.Printf("%sError: Migration name must follow format: create_<name>_table\n", scylladb.ColorRed)
-			fmt.Printf("Example: create_users_table, create_post_comments_table%s\n", scylladb.ColorReset)
-			os.Exit(1)
+		validateMigrationName(name)
+		if err := cql.CreateMigration(name); err != nil {
+			log.Fatalf("%sFailed to create migration: %v%s\n",
+				postgres.ColorRed, err, postgres.ColorReset)
 		}
 
-		// Check for singular table names
-		tableName := strings.TrimPrefix(name, "create_")
-		tableName = strings.TrimSuffix(tableName, "_table")
-		parts := strings.Split(tableName, "_")
-
-		if len(parts) == 1 && !strings.HasSuffix(parts[0], "s") {
-			fmt.Printf("%sError: Single table names should be plural\n", scylladb.ColorRed)
-			fmt.Printf("Example: 'create_user_table' should be 'create_users_table'%s\n", scylladb.ColorReset)
-			os.Exit(1)
-		}
-
-		// Check for plural in relation tables
-		if len(parts) > 1 && !strings.HasSuffix(parts[len(parts)-1], "s") {
-			fmt.Printf("%sError: In relation tables, names after the first word should be plural\n", scylladb.ColorRed)
-			fmt.Printf("Example: 'create_user_comment_table' should be 'create_user_comments_table'%s\n", scylladb.ColorReset)
-			os.Exit(1)
-		}
-
-		// Create a new migration with the specified name.
-		if err := scylladb.CreateMigration(name); err != nil {
-			fmt.Printf("%sError: Failed to create migration: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
-			os.Exit(1)
-		}
 	case "migrate":
-		if err := scylladb.Migrate(session); err != nil {
-			fmt.Printf("%sError: Failed to run migrations: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
-			os.Exit(1)
+		if err := cql.Migrate(session); err != nil {
+			log.Fatalf("%sFailed to run migrations: %v%s\n",
+				postgres.ColorRed, err, postgres.ColorReset)
 		}
-		fmt.Printf("%sMigrations completed successfully%s\n", scylladb.ColorGreen, scylladb.ColorReset)
-	case "rollback":
-		if err := scylladb.RollbackLast(session); err != nil {
-			fmt.Printf("%sError: Failed to rollback migration: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
-			os.Exit(1)
-		}
-		fmt.Printf("%sRollback completed successfully%s\n", scylladb.ColorGreen, scylladb.ColorReset)
+		fmt.Printf("%sMigrations completed successfully%s\n",
+			postgres.ColorGreen, postgres.ColorReset)
+
 	case "fresh":
-		fmt.Printf("%s[WARNING]%s This will drop all tables and reapply all migrations.\n", scylladb.ColorRed, scylladb.ColorReset)
-		fmt.Printf("Are you sure you want to continue? (y/N): ")
-
-		var response string
-		fmt.Scanln(&response)
-
-		if strings.ToLower(response) != "y" {
-			fmt.Printf("%sOperation cancelled%s\n", scylladb.ColorYellow, scylladb.ColorReset)
-			os.Exit(0)
+		confirmFreshMigration()
+		if err := cql.MigrateFresh(session); err != nil {
+			log.Fatalf("%sFailed to run fresh migrations: %v%s\n",
+				postgres.ColorRed, err, postgres.ColorReset)
 		}
+		fmt.Printf("%sFresh migration completed successfully%s\n",
+			postgres.ColorGreen, postgres.ColorReset)
 
-		if err := scylladb.MigrateFresh(session); err != nil {
-			fmt.Printf("%sError: Failed to run fresh migrations: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
-			os.Exit(1)
-		}
-		fmt.Printf("%sFresh migration completed successfully%s\n", scylladb.ColorGreen, scylladb.ColorReset)
 	case "list":
-		if err := scylladb.ListMigrations(session); err != nil {
-			fmt.Printf("%sError: Failed to list migrations: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
-			os.Exit(1)
+		if err := cql.ListMigrations(session); err != nil {
+			log.Fatalf("%sFailed to list migrations: %v%s\n",
+				postgres.ColorRed, err, postgres.ColorReset)
 		}
-	case "init":
-		initScyllaConfig()
 
 	default:
-		fmt.Printf("%sError: Unknown command: %s%s\n", postgres.ColorRed, command, postgres.ColorReset)
+		fmt.Printf("%sError: Unknown command: %s%s\n",
+			postgres.ColorRed, action, postgres.ColorReset)
 		os.Exit(1)
 	}
+}
+
+func handleScyllaRollback(action string, scyllaConfig *config.ScyllaConfig) {
+	// Parse rollback steps
+	parts := strings.Split(action, ":")
+	steps := 1 // Default to 1 step
+
+	if len(parts) > 1 {
+		if parts[1] == "all" {
+			steps = -1 // Special case for rolling back all migrations
+		} else {
+			var err error
+			steps, err = strconv.Atoi(parts[1])
+			if err != nil || steps < 1 {
+				log.Fatalf("%sInvalid rollback steps: %s%s\n",
+					postgres.ColorRed, parts[1], postgres.ColorReset)
+			}
+		}
+	}
+
+	// Create CQL session
+	cluster := gocql.NewCluster(scyllaConfig.Hosts...)
+	cluster.Keyspace = scyllaConfig.Keyspace
+	cluster.Consistency = gocql.Quorum
+	cluster.ProtoVersion = 4
+	if scyllaConfig.User != "" {
+		cluster.Authenticator = gocql.PasswordAuthenticator{
+			Username: scyllaConfig.User,
+			Password: scyllaConfig.Password,
+		}
+	}
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		log.Fatalf("%sUnable to connect to CQL database: %v%s\n",
+			postgres.ColorRed, err, postgres.ColorReset)
+	}
+	defer session.Close()
+
+	// Handle rollback
+	if err := cql.RollbackSteps(session, steps); err != nil {
+		log.Fatalf("%sFailed to rollback migrations: %v%s\n",
+			postgres.ColorRed, err, postgres.ColorReset)
+	}
+
+	if steps == -1 {
+		fmt.Printf("%sRolled back all migrations successfully%s\n",
+			postgres.ColorGreen, postgres.ColorReset)
+	} else {
+		fmt.Printf("%sRolled back %d migration(s) successfully%s\n",
+			postgres.ColorGreen, steps, postgres.ColorReset)
+	}
+}
+
+func handleMySQL(action string) {
+	myConfig, err := config.LoadConfig[config.MySQLConfig]("mysql")
+	if err != nil {
+		log.Fatalf("%sError loading MySQL config: %v%s\n",
+			mysql.ColorRed, err, mysql.ColorReset)
+	}
+
+	switch {
+	case action == "init":
+		initMySQLConfig()
+		return
+	case action == "create-db":
+		if err := mysql.CreateDatabase(myConfig); err != nil {
+			log.Fatalf("%s%v%s\n", mysql.ColorRed, err, mysql.ColorReset)
+		}
+		return
+	case strings.HasPrefix(action, "create-user"):
+		parts := strings.Split(action, ":")
+		if len(parts) != 2 {
+			log.Fatalf("%sUsage: mysql-create-user:[read|write|all|admin]%s\n",
+				mysql.ColorRed, mysql.ColorReset)
+		}
+		if err := mysql.CreateUser(myConfig, parts[1]); err != nil {
+			log.Fatalf("%s%v%s\n", mysql.ColorRed, err, mysql.ColorReset)
+		}
+		return
+	case strings.HasPrefix(action, "rollback"):
+		handleMySQLRollback(action, myConfig)
+		return
+	}
+
+	// Connect to database
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?multiStatements=true&parseTime=true",
+		myConfig.User, myConfig.Password, myConfig.Host, myConfig.Port, myConfig.DBName)
+
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		log.Fatalf("%sError connecting to MySQL: %v%s\n",
+			mysql.ColorRed, err, mysql.ColorReset)
+	}
+	defer db.Close()
+
+	// Handle different actions
+	switch action {
+	case "migrate":
+		err = mysql.Migrate(db)
+	case "fresh":
+		err = mysql.MigrateFresh(db)
+	case "list":
+		err = mysql.ListMigrations(db)
+	case "create":
+		name := flag.Arg(1)
+		if name == "" {
+			log.Fatalf("%sError: Migration name is required%s\n",
+				mysql.ColorRed, mysql.ColorReset)
+		}
+		err = mysql.CreateMigration(name)
+	default:
+		showUsage()
+		os.Exit(1)
+	}
+
+	if err != nil {
+		log.Fatalf("%sError: %v%s\n", mysql.ColorRed, err, mysql.ColorReset)
+	}
+}
+
+func handleMySQLRollback(action string, myConfig *config.MySQLConfig) {
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?multiStatements=true&parseTime=true",
+		myConfig.User, myConfig.Password, myConfig.Host, myConfig.Port, myConfig.DBName)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		log.Fatalf("%sError connecting to MySQL: %v%s\n",
+			mysql.ColorRed, err, mysql.ColorReset)
+	}
+	defer db.Close()
+
+	if action == "rollback" {
+		err = mysql.RollbackLast(db)
+	} else {
+		steps, err := strconv.Atoi(action[9:])
+		if err != nil {
+			log.Fatalf("%sError: Invalid rollback steps%s\n",
+				mysql.ColorRed, mysql.ColorReset)
+		}
+		err = mysql.RollbackSteps(db, steps)
+	}
+
+	if err != nil {
+		log.Fatalf("%sError: %v%s\n", mysql.ColorRed, err, mysql.ColorReset)
+	}
+}
+
+func initMySQLConfig() {
+	myConfig := getMySQLConfig()
+	if err := config.SaveConfig(myConfig, "mysql"); err != nil {
+		log.Fatalf("%sError saving MySQL config: %v%s\n",
+			mysql.ColorRed, err, mysql.ColorReset)
+	}
+	fmt.Printf("%s[SUCCESS]%s MySQL configuration saved\n",
+		mysql.ColorGreen, mysql.ColorReset)
+}
+
+func getMySQLConfig() config.MySQLConfig {
+	defaultConfig := config.MySQLConfig{
+		MigrationPath: "migrations/mysql",
+		SQLFolder:     "sql",
+		Host:          "localhost",
+		Port:          "3306",
+		User:          "root",
+		Password:      "",
+		DBName:        "mysql",
+	}
+
+	existingConfig, err := config.LoadConfig[config.MySQLConfig]("mysql")
+	if err == nil && existingConfig != nil {
+		defaultConfig = *existingConfig
+	}
+
+	printQuestion(fmt.Sprintf("Host [%s]: ", defaultConfig.Host))
+	host := readInput(defaultConfig.Host)
+
+	printQuestion(fmt.Sprintf("Port [%s]: ", defaultConfig.Port))
+	port := readInput(defaultConfig.Port)
+
+	printQuestion(fmt.Sprintf("Database [%s]: ", defaultConfig.DBName))
+	dbname := readInput(defaultConfig.DBName)
+
+	printQuestion(fmt.Sprintf("User [%s]: ", defaultConfig.User))
+	user := readInput(defaultConfig.User)
+
+	printQuestion(fmt.Sprintf("Password [%s]: ", maskPassword(defaultConfig.Password)))
+	password := readInput(defaultConfig.Password)
+
+	printQuestion(fmt.Sprintf("Migration Path [%s]: ", defaultConfig.MigrationPath))
+	migrationPath := readInput(defaultConfig.MigrationPath)
+
+	config := defaultConfig
+	config.MigrationPath = migrationPath
+	config.Host = host
+	config.Port = port
+	config.User = user
+	config.Password = password
+	config.DBName = dbname
+
+	return config
+}
+
+func getPostgresConfig() config.PostgresConfig {
+	defaultConfig := config.PostgresConfig{
+		MigrationPath: "migrations/postgres",
+		SQLFolder:     "sql",
+		Host:          "localhost",
+		Port:          "5432",
+		User:          "postgres",
+		Password:      "",
+		DBName:        "postgres",
+	}
+
+	existingConfig, err := config.LoadConfig[config.PostgresConfig]("postgres")
+	if err == nil && existingConfig != nil {
+		defaultConfig = *existingConfig
+	}
+
+	printQuestion(fmt.Sprintf("Host [%s]: ", defaultConfig.Host))
+	host := readInput(defaultConfig.Host)
+
+	printQuestion(fmt.Sprintf("Port [%s]: ", defaultConfig.Port))
+	port := readInput(defaultConfig.Port)
+
+	printQuestion(fmt.Sprintf("Database [%s]: ", defaultConfig.DBName))
+	dbname := readInput(defaultConfig.DBName)
+
+	printQuestion(fmt.Sprintf("User [%s]: ", defaultConfig.User))
+	user := readInput(defaultConfig.User)
+
+	printQuestion(fmt.Sprintf("Password [%s]: ", maskPassword(defaultConfig.Password)))
+	password := readInput(defaultConfig.Password)
+
+	printQuestion(fmt.Sprintf("Migration Path [%s]: ", defaultConfig.MigrationPath))
+	migrationPath := readInput(defaultConfig.MigrationPath)
+
+	config := defaultConfig
+	config.MigrationPath = migrationPath
+	config.Host = host
+	config.Port = port
+	config.User = user
+	config.Password = password
+	config.DBName = dbname
+
+	return config
+}
+
+func getScyllaConfig() config.ScyllaConfig {
+	defaultConfig := config.ScyllaConfig{
+		MigrationPath: "migrations/cql",
+		CQLFolder:     "cql",
+		Hosts:         []string{"localhost"},
+		User:          "",
+		Password:      "",
+		Keyspace:      "system",
+	}
+
+	existingConfig, err := config.LoadConfig[config.ScyllaConfig]("cql")
+	if err == nil && existingConfig != nil {
+		defaultConfig = *existingConfig
+	}
+
+	printQuestion(fmt.Sprintf("Hosts (comma-separated) [%s]: ", strings.Join(defaultConfig.Hosts, ",")))
+	hostsStr := readInput(strings.Join(defaultConfig.Hosts, ","))
+	hosts := strings.Split(hostsStr, ",")
+
+	printQuestion(fmt.Sprintf("Keyspace [%s]: ", defaultConfig.Keyspace))
+	keyspace := readInput(defaultConfig.Keyspace)
+
+	printQuestion(fmt.Sprintf("User [%s]: ", defaultString(defaultConfig.User, "<none>")))
+	user := readInput(defaultConfig.User)
+
+	printQuestion(fmt.Sprintf("Password [%s]: ", maskPassword(defaultConfig.Password)))
+	password := readInput(defaultConfig.Password)
+
+	printQuestion(fmt.Sprintf("Migration Path [%s]: ", defaultConfig.MigrationPath))
+	migrationPath := readInput(defaultConfig.MigrationPath)
+
+	config := defaultConfig
+	config.MigrationPath = migrationPath
+	config.Hosts = hosts
+	config.User = user
+	config.Password = password
+	config.Keyspace = keyspace
+
+	return config
+}
+
+// Helper function to mask password in display
+func maskPassword(password string) string {
+	if password == "" {
+		return ""
+	}
+	return "********"
+}
+
+// Helper function to show empty string as specified default
+func defaultString(value, defaultValue string) string {
+	if value == "" {
+		return defaultValue
+	}
+	return value
+}
+
+func readInput(defaultValue string) string {
+	var value string
+	fmt.Scanln(&value)
+	if value == "" {
+		return defaultValue
+	}
+	return strings.TrimSpace(value)
 }
 
 func initPostgresConfig() {
-
-	config := []struct {
-		key, description, defaultValue string
-	}{
-		{"POSTGRES_HOST", "PostgreSQL host", "localhost"},
-		{"POSTGRES_PORT", "PostgreSQL port", "5432"},
-		{"POSTGRES_USER", "PostgreSQL username", "postgres"},
-		{"POSTGRES_PASSWORD", "PostgreSQL password", ""},
-		{"POSTGRES_DATABASE_NAME", "PostgreSQL database name", ""},
-		{"POSTGRES_MIGRATIONS_PATH", "PostgreSQL Migrations Path", "database/migrations"},
-	}
-
-	fmt.Printf("\n%sPostgreSQL Configuration%s\n\n", postgres.ColorBold, postgres.ColorReset)
-	envContent := ""
-	var migrationPath string
-
-	for _, c := range config {
-		var value string
-		fmt.Printf("%s%s%s [%s]: ", postgres.ColorCyan, c.description, postgres.ColorReset, c.defaultValue)
-		fmt.Scanln(&value)
-
-		if value == "" {
-			value = c.defaultValue
-		}
-
-		if c.key == "POSTGRES_MIGRATIONS_PATH" {
-			migrationPath = value
-		} else {
-			envContent += fmt.Sprintf("%s=%s\n", c.key, value)
-		}
-	}
-
-	// Save the migration path to .jbmdb.conf
-	// Read existing config first to preserve ScyllaDB settings if they exist
-	existingConfig := make(map[string]string)
-	if data, err := os.ReadFile(DefaultConfigFile); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				existingConfig[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-			}
-		}
-	}
-
-	// Update PostgreSQL settings while preserving ScyllaDB settings
-	existingConfig["POSTGRES_MIGRATIONS_PATH"] = migrationPath
-	existingConfig["SQL_FOLDER"] = "sql"
-
-	// Create migrations directory and SQL folder inside it
-	if err := os.MkdirAll(migrationPath, 0755); err != nil {
-		fmt.Printf("%sError creating migrations directory: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
+	pgConfig := getPostgresConfig()
+	if err := config.SaveConfig(pgConfig, "postgres"); err != nil {
+		fmt.Printf("%sError saving PostgreSQL configuration: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
 		os.Exit(1)
 	}
-
-	// Create SQL folder inside the migrations directory
-	sqlPath := filepath.Join(migrationPath, "sql")
-	if err := os.MkdirAll(sqlPath, 0755); err != nil {
-		fmt.Printf("%sError creating SQL directory: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
-		os.Exit(1)
-	}
-
-	// Write back the complete configuration
-	var content string
-	for k, v := range existingConfig {
-		content += fmt.Sprintf("%s=%s\n", k, v)
-	}
-
-	if err := os.WriteFile(DefaultConfigFile, []byte(content), 0644); err != nil {
-		fmt.Printf("%sError saving migration path configuration: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
-		os.Exit(1)
-	}
-
-	writeEnvFile(envContent, true)
-
-	// Set the migration path in the postgres package
-	postgres.SetMigrationPath(migrationPath)
+	fmt.Printf("\n%sConfiguration saved successfully%s\n", postgres.ColorGreen, postgres.ColorReset)
 }
 
 func initScyllaConfig() {
-	config := []struct {
-		key, description, defaultValue string
-	}{
-		{"SCYLLA_HOSTS", "ScyllaDB hosts (comma-separated)", "localhost"},
-		{"SCYLLA_KEYSPACE", "ScyllaDB keyspace", ""},
-		{"SCYLLA_USER", "ScyllaDB username", ""},
-		{"SCYLLA_PASSWORD", "ScyllaDB password", ""},
-		{"SCYLLA_MIGRATIONS_PATH", "ScyllaDB Migrations Path", "database/migrations"},
-	}
-
-	fmt.Printf("\n%sScyllaDB Configuration%s\n\n", scylladb.ColorBold, scylladb.ColorReset)
-	envContent := ""
-	var migrationPath string
-
-	for _, c := range config {
-		var value string
-		fmt.Printf("%s%s%s [%s]: ", scylladb.ColorCyan, c.description, scylladb.ColorReset, c.defaultValue)
-		fmt.Scanln(&value)
-
-		if value == "" {
-			value = c.defaultValue
-		}
-
-		if c.key == "SCYLLA_MIGRATIONS_PATH" {
-			migrationPath = value
-		} else {
-			envContent += fmt.Sprintf("%s=%s\n", c.key, value)
-		}
-	}
-
-	// Read existing config first to preserve PostgreSQL settings if they exist
-	existingConfig := make(map[string]string)
-	if data, err := os.ReadFile(DefaultConfigFile); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				existingConfig[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-			}
-		}
-	}
-
-	// Update with new ScyllaDB settings
-	existingConfig["SCYLLA_MIGRATIONS_PATH"] = migrationPath
-	existingConfig["CQL_FOLDER"] = "cql"
-
-	// Create migrations directory and CQL folder inside it
-	if err := os.MkdirAll(migrationPath, 0755); err != nil {
-		fmt.Printf("%sError creating migrations directory: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
+	scConfig := getScyllaConfig()
+	if err := config.SaveConfig(scConfig, "cql"); err != nil {
+		fmt.Printf("%sError saving ScyllaDB configuration: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
 		os.Exit(1)
 	}
-
-	// Create CQL folder inside the migrations directory
-	cqlPath := filepath.Join(migrationPath, "cql")
-	if err := os.MkdirAll(cqlPath, 0755); err != nil {
-		fmt.Printf("%sError creating CQL directory: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
-		os.Exit(1)
-	}
-
-	// Write back the complete configuration
-	var content string
-	for k, v := range existingConfig {
-		content += fmt.Sprintf("%s=%s\n", k, v)
-	}
-
-	if err := os.WriteFile(DefaultConfigFile, []byte(content), 0644); err != nil {
-		fmt.Printf("%sError saving migration path configuration: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
-		os.Exit(1)
-	}
-
-	writeEnvFile(envContent, false)
-
-	// Set the migration path in the scylladb package
-	scylladb.SetMigrationPath(migrationPath)
+	fmt.Printf("\n%sConfiguration saved successfully%s\n", postgres.ColorGreen, postgres.ColorReset)
 }
 
 func handleUpdate() {
 	release, err := update.CheckForUpdates(Version)
 	if err != nil {
-		fmt.Printf("%sError checking for updates: %v%s\n", scylladb.ColorRed, err, scylladb.ColorReset)
+		fmt.Printf("%sError checking for updates: %v%s\n", cql.ColorRed, err, cql.ColorReset)
 		os.Exit(1)
 	}
 	if release == nil {
-		fmt.Printf("%sYou are already running the latest version%s\n", scylladb.ColorGreen, scylladb.ColorReset)
+		fmt.Printf("%sYou are already running the latest version%s\n", cql.ColorGreen, cql.ColorReset)
 		return
 	}
 
-	fmt.Printf("%sNew version %s available!%s\n", scylladb.ColorCyan, release.TagName, scylladb.ColorReset)
+	fmt.Printf("%sNew version %s available!%s\n", cql.ColorCyan, release.TagName, cql.ColorReset)
 	update.PrintUpdateChangelog(release)
 
 	fmt.Print("Do you want to update now? (y/N): ")
@@ -653,41 +692,185 @@ func handleUpdate() {
 	fmt.Printf("%sUpdate successful! Please restart jbmdb to use the new version if it doesn't start automatically`%s\n", postgres.ColorGreen, postgres.ColorReset)
 }
 
-func writeEnvFile(content string, isPostgres bool) {
-	// Read existing .env file if it exists
-	existingContent := ""
-	if data, err := os.ReadFile(".env"); err == nil {
-		existingContent = string(data)
+func validateMigrationName(name string) {
+	if !strings.HasPrefix(name, "create_") || !strings.HasSuffix(name, "_table") {
+		fmt.Printf("%sError: Migration name must follow format: create_<name>_table\n", postgres.ColorRed)
+		fmt.Printf("Example: create_users_table, create_post_comments_table%s\n", postgres.ColorReset)
+		os.Exit(1)
 	}
 
-	// Combine existing content with new content
-	if isPostgres {
-		// Remove existing PostgreSQL config
-		lines := strings.Split(existingContent, "\n")
-		filtered := []string{}
-		for _, line := range lines {
-			if !strings.HasPrefix(line, "POSTGRES_") {
-				filtered = append(filtered, line)
-			}
+	tableName := strings.TrimPrefix(name, "create_")
+	tableName = strings.TrimSuffix(tableName, "_table")
+	parts := strings.Split(tableName, "_")
+
+	if len(parts) == 1 && !strings.HasSuffix(parts[0], "s") {
+		fmt.Printf("%sError: Single table names should be plural\n", postgres.ColorRed)
+		fmt.Printf("Example: 'create_user_table' should be 'create_users_table'%s\n", postgres.ColorReset)
+		os.Exit(1)
+	}
+
+	if len(parts) > 1 && !strings.HasSuffix(parts[len(parts)-1], "s") {
+		fmt.Printf("%sError: In relation tables, names after the first word should be plural\n", postgres.ColorRed)
+		fmt.Printf("Example: 'create_user_comment_table' should be 'create_user_comments_table'%s\n", postgres.ColorReset)
+		os.Exit(1)
+	}
+}
+
+func confirmFreshMigration() {
+	fmt.Printf("%s[WARNING]%s This will drop all tables and reapply all migrations.\n", postgres.ColorRed, postgres.ColorReset)
+	fmt.Printf("Are you sure you want to continue? (y/N): ")
+
+	var response string
+	fmt.Scanln(&response)
+
+	if strings.ToLower(response) != "y" {
+		fmt.Printf("%sOperation cancelled%s\n", postgres.ColorYellow, postgres.ColorReset)
+		os.Exit(0)
+	}
+}
+
+func showUsage() {
+	fmt.Printf(`
+JBMDB Database Migration Tool
+
+Usage: jbmdb <command>
+
+Commands:
+    config                Initialize configuration
+    update                Update jbmdb to latest version
+    version               Show version information
+
+PostgreSQL Commands:
+    postgres-migration <n>   Create a new PostgreSQL migration
+    postgres-migrate       Run all pending PostgreSQL migrations
+    postgres-rollback      Rollback the last PostgreSQL migration
+    postgres-rollback:all  Rollback all PostgreSQL migrations
+    postgres-rollback:<n>  Rollback n PostgreSQL migrations
+    postgres-fresh         Drop all tables and reapply PostgreSQL migrations
+    postgres-list          List all PostgreSQL migrations
+    postgres-init          Initialize PostgreSQL configuration
+    postgres-create-db     Create database if not exists
+    postgres-create-user:[read|write|all|admin]  Create user with specified privileges
+
+MySQL Commands:
+    mysql-migration <n>     Create a new MySQL migration
+    mysql-migrate         Run all pending MySQL migrations
+    mysql-rollback        Rollback the last MySQL migration
+    mysql-rollback:all    Rollback all MySQL migrations
+    mysql-rollback:<n>    Rollback n MySQL migrations
+    mysql-fresh           Drop all tables and reapply MySQL migrations
+    mysql-list            List all MySQL migrations
+    mysql-init            Initialize MySQL configuration
+    mysql-create-db       Create database if not exists
+    mysql-create-user:[read|write|all|admin]    Create user with specified privileges
+
+CQL Commands (Cassandra/ScyllaDB):
+    cql-migration <n>     Create a new CQL migration
+    cql-migrate         Run all pending CQL migrations
+    cql-rollback        Rollback the last CQL migration
+    cql-rollback:all    Rollback all CQL migrations
+    cql-rollback:<n>    Rollback n CQL migrations
+    cql-fresh           Drop all tables and reapply CQL migrations
+    cql-list            List all CQL migrations
+    cql-init            Initialize CQL configuration
+    cql-create-keyspace:[strategy]:[rf]  Create keyspace with replication
+    cql-create-user:[read|write|all|admin]  Create user with specified privileges
+
+Current Configuration:
+  PostgreSQL migrations: migrations/postgres
+  MySQL migrations:      migrations/mysql
+  CQL migrations:        migrations/cql
+
+Privilege Levels:
+  read:   SELECT privileges only
+  write:  SELECT, MODIFY privileges (SELECT, INSERT, UPDATE, DELETE for SQL)
+  all:    All privileges on database/keyspace
+  admin:  All privileges with GRANT OPTION
+
+Replication Strategies (Cassandra/ScyllaDB):
+  SimpleStrategy:           Single datacenter deployment
+  NetworkTopologyStrategy: Multi-datacenter deployment
+  RF: Replication Factor (number of copies)
+`)
+}
+
+func initConfig() error {
+	printHeader("Database Configuration")
+
+	printQuestion("\nWhich databases would you like to configure?\n")
+	printOption(1, "PostgreSQL only")
+	printOption(2, "MySQL/MariaDB only")
+	printOption(3, "Cassandra/ScyllaDB only")
+	printOption(4, "All databases")
+	printQuestion("Choose (1-4): ")
+
+	var choice int
+	_, err := fmt.Scanf("%d", &choice)
+	if err != nil {
+		return fmt.Errorf("invalid input: %v", err)
+	}
+
+	switch choice {
+	case 1:
+		printSubHeader("PostgreSQL Configuration")
+		pgConfig := getPostgresConfig()
+		if err := config.SaveConfig(pgConfig, "postgres"); err != nil {
+			return fmt.Errorf("failed to save PostgreSQL config: %v", err)
 		}
-		existingContent = strings.Join(filtered, "\n")
-	} else {
-		// Remove existing ScyllaDB config
-		lines := strings.Split(existingContent, "\n")
-		filtered := []string{}
-		for _, line := range lines {
-			if !strings.HasPrefix(line, "SCYLLA_") {
-				filtered = append(filtered, line)
-			}
+	case 2:
+		printSubHeader("MySQL/MariaDB Configuration")
+		mysqlConfig := getMySQLConfig()
+		if err := config.SaveConfig(mysqlConfig, "mysql"); err != nil {
+			return fmt.Errorf("failed to save MySQL config: %v", err)
 		}
-		existingContent = strings.Join(filtered, "\n")
+	case 3:
+		printSubHeader("Cassandra/ScyllaDB Configuration")
+		cqlConfig := getScyllaConfig()
+		if err := config.SaveConfig(cqlConfig, "cql"); err != nil {
+			return fmt.Errorf("failed to save CQL config: %v", err)
+		}
+	case 4:
+		// Configure all databases
+		printSubHeader("PostgreSQL Configuration")
+		pgConfig := getPostgresConfig()
+		if err := config.SaveConfig(pgConfig, "postgres"); err != nil {
+			return fmt.Errorf("failed to save PostgreSQL config: %v", err)
+		}
+
+		fmt.Println() // Add a blank line between configurations
+		printSubHeader("MySQL/MariaDB Configuration")
+		mysqlConfig := getMySQLConfig()
+		if err := config.SaveConfig(mysqlConfig, "mysql"); err != nil {
+			return fmt.Errorf("failed to save MySQL config: %v", err)
+		}
+
+		fmt.Println() // Add a blank line between configurations
+		printSubHeader("Cassandra/ScyllaDB Configuration")
+		cqlConfig := getScyllaConfig()
+		if err := config.SaveConfig(cqlConfig, "cql"); err != nil {
+			return fmt.Errorf("failed to save CQL config: %v", err)
+		}
+	default:
+		return fmt.Errorf("%sinvalid choice: %d. Please choose between 1-4%s", colorRed, choice, colorReset)
 	}
 
-	// Write combined content to .env file
-	finalContent := strings.TrimSpace(existingContent) + "\n\n" + strings.TrimSpace(content) + "\n"
-	if err := os.WriteFile(".env", []byte(finalContent), 0644); err != nil {
-		log.Fatalf("%sError writing .env file: %v%s\n", postgres.ColorRed, err, postgres.ColorReset)
-	}
+	return nil
+}
 
-	fmt.Printf("\n%sConfiguration saved to .env file%s\n", postgres.ColorGreen, postgres.ColorReset)
+func printHeader(text string) {
+	fmt.Printf("\n%s%s%s%s\n", colorBlue, textBold, text, colorReset)
+	fmt.Println(strings.Repeat("=", len(text)))
+}
+
+func printSubHeader(text string) {
+	fmt.Printf("\n%s%s%s%s\n", colorPurple, textBold, text, colorReset)
+	fmt.Println(strings.Repeat("-", len(text)))
+}
+
+func printQuestion(text string) {
+	fmt.Printf("%s%s%s", colorCyan, text, colorReset)
+}
+
+func printOption(num int, text string) {
+	fmt.Printf("%s%d%s. %s\n", colorGreen, num, colorReset, text)
 }

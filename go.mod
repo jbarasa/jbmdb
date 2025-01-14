@@ -1,13 +1,11 @@
-module github.com/jbarasa/jbmdb // v1.0.0
+module github.com/jbarasa/jbmdb // v2.0.0
 
 go 1.23.4
 
-require (
-	github.com/jackc/pgx/v5 v5.7.2
-	github.com/joho/godotenv v1.5.1
-)
+require github.com/jackc/pgx/v5 v5.7.2
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/golang/snappy v0.0.3 // indirect
 	github.com/hailocab/go-hostpool v0.0.0-20160125115350-e80d13ce29ed // indirect
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
@@ -15,6 +13,7 @@ require (
 )
 
 require (
+	github.com/go-sql-driver/mysql v1.8.1
 	github.com/gocql/gocql v1.7.0
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

@@ -2,6 +2,7 @@ GIT_COMMANDS.md
 # Binaries and build artifacts
 build/
 *.exe
+*.exe~
 *.dll
 *.so
 *.dylib
@@ -17,7 +18,7 @@ build
 
 # Environment and configuration files
 .env
-*.env
+.env.test
 .env.*
 
 # Dependency directories
@@ -26,6 +27,10 @@ vendor/
 # Test files
 *.test
 *.tmp
+migrations/test/tmp/
+migrations/test/*.log
+migrations/test/mock_*.json
+migrations/test/coverage.html
 
 # Log files
 *.log
@@ -33,3 +38,10 @@ vendor/
 # OS-specific files
 .DS_Store
 Thumbs.db
+
+# Local configuration
+.jbmdb/
+.jbmdb.conf
+
+# Generated files
+*.generated.go
